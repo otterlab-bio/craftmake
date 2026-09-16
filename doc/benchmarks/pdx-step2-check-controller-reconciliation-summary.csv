@@ -1,0 +1,3 @@
+scenario,metric,n_paired_repeats,craftmake_median_seconds,craftmake_minimum_seconds,craftmake_maximum_seconds,snakemake_median_seconds,snakemake_minimum_seconds,snakemake_maximum_seconds,paired_median_difference_seconds_snakemake_minus_craftmake,wilcoxon_two_sided_p_value_exact,source_report_sha256
+bs-pdx,controller_reconciliation_seconds,3,4.213,2.385,5.057,19.819,14.008,164.668,15.606,0.250000,c80a81a26635c91c850e940b5157d88a727d44dbed2e31e67537ceb1838278f0
+rna-pdx,controller_reconciliation_seconds,3,2.651,1.552,4.308,9.478,8.458,29.556,5.807,0.250000,c80a81a26635c91c850e940b5157d88a727d44dbed2e31e67537ceb1838278f0

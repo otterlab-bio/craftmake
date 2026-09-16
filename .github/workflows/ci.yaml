@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./... -count=1
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Build release archives
+        run: make release VERSION=0.0.0-ci COMMIT="${GITHUB_SHA}" BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Verify release checksums
+        run: cd dist && sha256sum -c checksums.txt
+
+      - name: Validate automatic workflow routing
+        run: |
+          temporary_directory="$(mktemp -d)"
+          trap 'rm -rf "$temporary_directory"' EXIT
+          tar -xzf dist/craftmake_0.0.0-ci_linux_amd64.tar.gz -C "$temporary_directory"
+          installed_binary="$temporary_directory/craftmake_0.0.0-ci_linux_amd64/bin/craftmake"
+          "$installed_binary" validate \
+            --legacy-config \
+            --config testdata/configs/beaverrnaseqpdx-step3-check.yaml \
+            --phase step3-check
+
+      - name: Upload build and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: craftmake-ci-evidence
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 90

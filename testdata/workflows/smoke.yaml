@@ -1,0 +1,39 @@
+name: Smoke workflow
+version: 1
+on:
+  otter:
+    workflow: Smoke
+    phase: step1
+    modes: [RRBS]
+defaults:
+  shell: bash
+jobs:
+  prepare:
+    name: Prepare sample
+    scope: sample
+    dimensions: [sample]
+    outputs:
+      result: "output/workflow/${{ sample.id }}.txt"
+    resources:
+      cores: 1
+      memory: 32M
+    steps:
+      - name: Write sample result
+        run: |
+          mkdir -p "$(dirname '${{ outputs.result }}')"
+          printf '%s\n' '${{ sample.id }}' > '${{ outputs.result }}'
+  aggregate:
+    name: Aggregate samples
+    scope: global
+    inputs:
+      results: "${{ jobs.prepare.outputs.result }}"
+    outputs:
+      report: "output/workflow/report.txt"
+    needs: [prepare]
+    resources:
+      cores: 1
+      memory: 32M
+    steps:
+      - name: Build report
+        run: |
+          cat ${{ inputs.results }} > '${{ outputs.report }}'

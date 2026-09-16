@@ -1,0 +1,55 @@
+SIDs:
+  - sample-a
+  - sample-b
+mode: RNASEQ
+species: human
+jobid: beaverrna-step2-check-fixture
+userid: fixture-user
+output:
+  trim_dir: workflow/trim
+  workflow_dir: workflow
+  analysis_dir: analysis
+  log_dir: workflow/log
+directories:
+  work: workflow
+  selfconfig: config
+  bsmap:
+    main: workflow/bsmap
+  methylation_call: workflow/expression
+  beta_matrix: workflow/expression/matrix
+  qualimap: workflow/QC/qualimap
+  qc:
+    main: workflow/QC
+    before: workflow/fastqc_raw
+    after: workflow/fastqc_clean
+  qc_summary: workflow/QC/summary
+  sid_log: workflow/log
+workflow:
+  mode: RNASEQ
+  jobid: beaverrna-step2-check-fixture
+  userid: fixture-user
+  species:
+    name:
+      - human
+    primary: human
+    secondary: ""
+    graft: human
+metadata:
+  sample_ids:
+    - sample-a
+    - sample-b
+  user_email: fixture@example.invalid
+  pdx_pipeline: "false"
+  group_levels: 2
+reference:
+  files:
+    fasta:
+      - references/human.fasta
+  indices:
+    genome:
+      - references/star-human
+  rnaseq:
+    gtf:
+      - references/human.gtf
+    ref:
+      - references/star-human

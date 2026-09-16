@@ -1,0 +1,56 @@
+SIDs:
+  - sample-a
+  - sample-b
+mode: RRBS
+species: human
+jobid: beaverbs-step1-fixture
+userid: fixture-user
+input:
+  fastq_dir: data
+  suffix: _R1.fastq.gz
+  suffix2: _R2.fastq.gz
+output:
+  raw_dir: data
+  trim_dir: workflow/trim
+  workflow_dir: workflow
+  analysis_dir: analysis
+  log_dir: workflow/log
+directories:
+  qc:
+    main: workflow/QC
+    before: workflow/fastqc_raw
+    after: workflow/fastqc_clean
+  sid_log: workflow/log
+workflow:
+  mode: RRBS
+  jobid: beaverbs-step1-fixture
+  userid: fixture-user
+  species:
+    primary: human
+    secondary: ""
+    name: human
+  adapters:
+    error: 0.2
+    seq1:
+      - AGATCGGAAGAGC
+      - NO_ADAPTER_CAL_USE_DEFAULT
+    seq2:
+      - AGATCGGAAGAGC
+      - NO_ADAPTER_CAL_USE_DEFAULT
+  alignment:
+    c1: 7
+    c2: 9
+    t1: 0
+    t2: 0
+metadata:
+  sample_ids:
+    - sample-a
+    - sample-b
+  user_email: fixture@example.invalid
+reference:
+  files:
+    fasta:
+      - references/human.fasta
+  indices:
+    genome:
+      - references/bismark-human

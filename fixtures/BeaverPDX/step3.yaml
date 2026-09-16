@@ -1,0 +1,43 @@
+SIDs:
+  - sample-a
+  - sample-b
+mode: RRBS
+species1: human
+species2: mouse
+jobid: beaverpdx-step3-fixture
+userid: fixture-user
+output:
+  workflow_dir: workflow
+  analysis_dir: analysis
+  log_dir: workflow/log
+directories:
+  work: workflow
+  bsmap:
+    main: workflow/bsmap
+  methylation_call: workflow/mCall
+  sid_log: workflow/log
+workflow:
+  mode: RRBS
+  jobid: beaverpdx-step3-fixture
+  userid: fixture-user
+  species:
+    name:
+      - human
+      - mouse
+    primary: human
+    secondary: mouse
+    graft: human
+    host: mouse
+metadata:
+  sample_ids:
+    - sample-a
+    - sample-b
+reference:
+  files:
+    fasta:
+      - references/human.fasta
+      - references/mouse.fasta
+  indices:
+    genome:
+      - references/bismark-human
+      - references/bismark-mouse

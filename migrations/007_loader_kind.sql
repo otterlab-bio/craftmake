@@ -1,0 +1,1 @@
+ALTER TABLE runs ADD COLUMN loader_kind TEXT NOT NULL DEFAULT 'unknown';

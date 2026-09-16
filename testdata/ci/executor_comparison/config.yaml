@@ -1,0 +1,12 @@
+schema_version: craftmake.standalone/v1
+workflow:
+  name: ExecutorComparison
+  phase: step1
+  backend: local
+run:
+  id: executor-comparison-run
+  project_dir: .
+  state_dir: .craftmake
+samples:
+  - id: sampleA
+  - id: sampleB

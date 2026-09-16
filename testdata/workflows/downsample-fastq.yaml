@@ -1,0 +1,89 @@
+name: Downsample paired FASTQ fixtures
+version: 1
+on:
+  otter:
+    workflow: FixtureDownsample
+    phase: fastq
+    modes: [STANDALONE]
+defaults:
+  shell: bash
+  observability:
+    metrics: task
+    capture_stdout: true
+    capture_stderr: true
+jobs:
+  downsample_fastq:
+    name: Downsample synchronized paired FASTQ
+    scope: sample
+    dimensions: [sample]
+    inputs:
+      read1: "data/${{ sample.id }}/R1.fastq.gz"
+      read2: "data/${{ sample.id }}/R2.fastq.gz"
+    outputs:
+      read1: "results/${{ sample.id }}/R1.fastq.gz"
+      read2: "results/${{ sample.id }}/R2.fastq.gz"
+      manifest: "results/${{ sample.id }}/manifest.json"
+    resources:
+      cores: 1
+      memory: 2G
+    steps:
+      - name: Write deterministic paired FASTQ fixture
+        run: |
+          python3 - "${{ inputs.read1 }}" "${{ inputs.read2 }}" "${{ outputs.read1 }}" "${{ outputs.read2 }}" "${{ outputs.manifest }}" <<'PY'
+          import gzip
+          import hashlib
+          import json
+          import os
+          import sys
+
+          input_read1, input_read2, output_read1, output_read2, manifest_path = sys.argv[1:]
+          maximum_pairs = 20000
+          os.makedirs(os.path.dirname(output_read1), exist_ok=True)
+
+          def normalize_read_name(identifier):
+              name = identifier.split()[0]
+              if name.endswith('/1') or name.endswith('/2'):
+                  return name[:-2]
+              return name
+
+          pair_count = 0
+          with gzip.open(input_read1, 'rt') as read1_handle, gzip.open(input_read2, 'rt') as read2_handle, gzip.open(output_read1, 'wt') as output_read1_handle, gzip.open(output_read2, 'wt') as output_read2_handle:
+              while pair_count < maximum_pairs:
+                  read1_record = [read1_handle.readline() for _ in range(4)]
+                  read2_record = [read2_handle.readline() for _ in range(4)]
+                  if not read1_record[0] or not read2_record[0]:
+                      break
+                  if any(not line for line in read1_record + read2_record):
+                      raise RuntimeError('truncated FASTQ record')
+                  if normalize_read_name(read1_record[0][1:]) != normalize_read_name(read2_record[0][1:]):
+                      raise RuntimeError(f'paired read name mismatch: {read1_record[0].rstrip()} vs {read2_record[0].rstrip()}')
+                  if read1_record[0][0] != '@' or read2_record[0][0] != '@' or read1_record[2][0] != '+' or read2_record[2][0] != '+':
+                      raise RuntimeError('invalid FASTQ record structure')
+                  output_read1_handle.writelines(read1_record)
+                  output_read2_handle.writelines(read2_record)
+                  pair_count += 1
+
+          def sha256_file(path):
+              digest = hashlib.sha256()
+              with open(path, 'rb') as handle:
+                  for block in iter(lambda: handle.read(1024 * 1024), b''):
+                      digest.update(block)
+              return digest.hexdigest()
+
+          manifest = {
+              'schema_version': 'otter.fixture.fastq/v1',
+              'sample_id': os.path.basename(os.path.dirname(output_read1)),
+              'sampling': {'method': 'first_synchronized_pairs', 'maximum_pairs': maximum_pairs, 'pairs_written': pair_count},
+              'inputs': {
+                  'read1': {'path': os.path.abspath(input_read1), 'bytes': os.path.getsize(input_read1), 'sha256': sha256_file(input_read1)},
+                  'read2': {'path': os.path.abspath(input_read2), 'bytes': os.path.getsize(input_read2), 'sha256': sha256_file(input_read2)},
+              },
+              'outputs': {
+                  'read1': {'path': os.path.abspath(output_read1), 'bytes': os.path.getsize(output_read1), 'sha256': sha256_file(output_read1)},
+                  'read2': {'path': os.path.abspath(output_read2), 'bytes': os.path.getsize(output_read2), 'sha256': sha256_file(output_read2)},
+              },
+          }
+          with open(manifest_path, 'w', encoding='utf-8') as manifest_handle:
+              json.dump(manifest, manifest_handle, indent=2, sort_keys=True)
+              manifest_handle.write('\n')
+          PY

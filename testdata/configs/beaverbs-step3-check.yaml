@@ -1,0 +1,49 @@
+SIDs:
+  - sample-a
+  - sample-b
+mode: RRBS
+species: human
+jobid: beaverbs-step3-check-fixture
+userid: fixture-user
+output:
+  trim_dir: workflow/trim
+  workflow_dir: workflow
+  analysis_dir: analysis
+  log_dir: workflow/log
+directories:
+  work: workflow
+  selfconfig: config
+  bsmap:
+    main: workflow/bsmap
+  methylation_call: workflow/mCall
+  qualimap: workflow/QC/qualimap
+  qc:
+    main: workflow/QC
+    before: workflow/fastqc_raw
+    after: workflow/fastqc_clean
+  qc_summary: workflow/QC/summary
+  sid_log: workflow/log
+workflow:
+  mode: RRBS
+  jobid: beaverbs-step3-check-fixture
+  userid: fixture-user
+  species:
+    primary: human
+    secondary: ""
+    name: human
+    graft: human
+metadata:
+  sample_ids:
+    - sample-a
+    - sample-b
+  user_email: fixture@example.invalid
+reference:
+  files:
+    fasta:
+      - references/human.fasta
+  indices:
+    genome:
+      - references/bismark-human
+  rnaseq:
+    gtf:
+      - references/human.gtf

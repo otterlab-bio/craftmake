@@ -1,0 +1,36 @@
+import os
+
+# The comparison shares one config file with the Craftmake arm, where samples are declared as
+# `- id: sampleA`. Snakemake needs the bare sample identifiers, so normalise either form.
+_declared_samples = config.get("samples", ["sampleA", "sampleB"])
+SAMPLES = [
+    entry["id"] if isinstance(entry, dict) and "id" in entry else str(entry)
+    for entry in _declared_samples
+]
+
+rule all:
+    input:
+        "output/summary.tsv"
+
+rule sample_task:
+    output:
+        "output/samples/{sample}.tsv"
+    shell:
+        """
+        mkdir -p "$(dirname '{output}')"
+        printf 'sample\tvalue\n%s\t100\n' '{wildcards.sample}' > '{output}'
+        """
+
+rule aggregate_task:
+    input:
+        expand("output/samples/{sample}.tsv", sample=SAMPLES)
+    output:
+        "output/summary.tsv"
+    shell:
+        """
+        mkdir -p "$(dirname '{output}')"
+        printf 'sample\tvalue\n' > '{output}'
+        for file in {input}; do
+            tail -n +2 "$file" >> '{output}'
+        done
+        """

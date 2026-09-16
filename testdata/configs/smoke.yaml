@@ -1,0 +1,26 @@
+workflow:
+  mode: RRBS
+  jobid: smoke
+  userid: tester
+  species:
+    primary: human
+  adapters:
+    seq1: [NO_ADAPTER_CAL_USE_DEFAULT, NO_ADAPTER_CAL_USE_DEFAULT]
+    seq2: [NO_ADAPTER_CAL_USE_DEFAULT, NO_ADAPTER_CAL_USE_DEFAULT]
+input:
+  fastq_dir: data
+  suffix: _R1.fastq.gz
+  suffix2: _R2.fastq.gz
+output:
+  raw_dir: data
+  trim_dir: output/trim
+  workflow_dir: output/workflow
+  analysis_dir: output/analysis
+metadata:
+  SIDs: [sampleA, sampleB]
+reference:
+  genome_fasta: [references/human.fa]
+  genome_index: [references/human]
+directories:
+  qc_summary: output/qc_summary
+  sid_log: output/log

@@ -1,0 +1,42 @@
+name: ExecutorComparison
+version: 1
+on:
+  otter:
+    workflow: ExecutorComparison
+    phase: step1
+defaults:
+  shell: bash
+jobs:
+  sample_task:
+    name: Process sample
+    scope: sample
+    dimensions: [sample]
+    outputs:
+      result: "output/samples/${{ sample.id }}.tsv"
+    resources:
+      cores: 1
+      memory: 64M
+    steps:
+      - name: Write sample summary
+        run: |
+          mkdir -p "$(dirname '${{ outputs.result }}')"
+          printf 'sample\tvalue\n%s\t100\n' '${{ sample.id }}' > '${{ outputs.result }}'
+  aggregate_task:
+    name: Aggregate samples
+    scope: global
+    inputs:
+      results: "${{ jobs.sample_task.outputs.result }}"
+    outputs:
+      summary: "output/summary.tsv"
+    needs: [sample_task]
+    resources:
+      cores: 1
+      memory: 64M
+    steps:
+      - name: Merge summaries
+        run: |
+          mkdir -p "$(dirname '${{ outputs.summary }}')"
+          printf 'sample\tvalue\n' > '${{ outputs.summary }}'
+          for file in ${{ inputs.results }}; do
+            tail -n +2 "$file" >> '${{ outputs.summary }}'
+          done

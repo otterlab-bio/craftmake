@@ -1,0 +1,133 @@
+name: Downsample BAM fixtures
+version: 1
+on:
+  otter:
+    workflow: FixtureDownsample
+    phase: bam
+    modes: [STANDALONE]
+defaults:
+  shell: bash
+  observability:
+    metrics: task
+    capture_stdout: true
+    capture_stderr: true
+jobs:
+  downsample_bam:
+    name: Downsample paired BAM and build index
+    scope: sample
+    dimensions: [sample]
+    inputs:
+      bam: "data/${{ sample.id }}/input.bam"
+    outputs:
+      bam: "results/${{ sample.id }}/fixture.bam"
+      bai: "results/${{ sample.id }}/fixture.bam.bai"
+      manifest: "results/${{ sample.id }}/manifest.json"
+    resources:
+      cores: 2
+      memory: 4G
+    steps:
+      - name: Select paired templates and publish sorted BAM
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname '${{ outputs.bam }}')"
+          temporary_sam="${{ outputs.bam }}.selected.sam"
+          temporary_bam="${{ outputs.bam }}.selected.bam"
+          temporary_collate_prefix="${{ outputs.bam }}.collate"
+          trap 'rm -f "$temporary_sam" "$temporary_bam" "$temporary_collate_prefix".*' EXIT
+          set +e
+          samtools collate -Ou '${{ inputs.bam }}' "$temporary_collate_prefix" | samtools view -h - | python3 -c '
+          import sys
+
+          target_templates = 20000
+          current_query_name = None
+          current_records = []
+          selected_templates = 0
+          stopped = False
+
+          def emit_selected_group(records):
+              global selected_templates, stopped
+              if not records or stopped:
+                  return
+              primary_records = []
+              for record in records:
+                  fields = record.rstrip("\n").split("\t")
+                  if len(fields) < 11:
+                      raise SystemExit("invalid SAM alignment record")
+                  alignment_flags = int(fields[1])
+                  if not alignment_flags & 0x900:
+                      primary_records.append(alignment_flags)
+              has_read_one = any(flags & 0x40 for flags in primary_records)
+              has_read_two = any(flags & 0x80 for flags in primary_records)
+              if len(primary_records) != 2 or not has_read_one or not has_read_two:
+                  return
+              if selected_templates >= target_templates:
+                  stopped = True
+                  return
+              sys.stdout.writelines(records)
+              selected_templates += 1
+
+          for line in sys.stdin:
+              if stopped:
+                  break
+              if line.startswith("@"):
+                  if current_query_name is None:
+                      sys.stdout.write(line)
+                  continue
+              query_name = line.split("\t", 1)[0]
+              if current_query_name is not None and query_name != current_query_name:
+                  emit_selected_group(current_records)
+                  current_records = []
+              current_query_name = query_name
+              current_records.append(line)
+          emit_selected_group(current_records)
+          ' > "$temporary_sam"
+          selection_status=$?
+          set -e
+          if [[ "$selection_status" -ne 0 && "$selection_status" -ne 141 ]]; then
+            printf 'template selection pipeline failed with exit %s\n' "$selection_status" >&2
+            exit "$selection_status"
+          fi
+          samtools view -b -o "$temporary_bam" "$temporary_sam"
+          samtools sort -@ '${{ resources.cores }}' -o '${{ outputs.bam }}' "$temporary_bam"
+          samtools index -@ '${{ resources.cores }}' '${{ outputs.bam }}' '${{ outputs.bai }}'
+          samtools quickcheck -v '${{ outputs.bam }}'
+          test -s '${{ outputs.bai }}'
+          python3 - '${{ inputs.bam }}' '${{ outputs.bam }}' '${{ outputs.bai }}' '${{ outputs.manifest }}' <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import sys
+
+          input_bam, output_bam, output_bai, manifest_path = sys.argv[1:]
+
+          def sha256_file(path):
+              digest = hashlib.sha256()
+              with open(path, 'rb') as handle:
+                  for block in iter(lambda: handle.read(1024 * 1024), b''):
+                      digest.update(block)
+              return digest.hexdigest()
+
+          def samtools_count(*arguments):
+              result = subprocess.run(['samtools', *arguments], check=True, capture_output=True, text=True)
+              return int(result.stdout.strip())
+
+          manifest = {
+              'schema_version': 'otter.fixture.bam/v1',
+              'sample_id': os.path.basename(os.path.dirname(output_bam)),
+              'sampling': {'method': 'first_n_complete_templates_after_collate', 'target_templates': 20000},
+              'pairing': {'selection_unit': 'query_name', 'sorted': True, 'indexed': True},
+              'inputs': {'bam': {'path': os.path.abspath(input_bam), 'bytes': os.path.getsize(input_bam), 'sha256': sha256_file(input_bam)}},
+              'outputs': {
+                  'bam': {'path': os.path.abspath(output_bam), 'bytes': os.path.getsize(output_bam), 'sha256': sha256_file(output_bam)},
+                  'bai': {'path': os.path.abspath(output_bai), 'bytes': os.path.getsize(output_bai), 'sha256': sha256_file(output_bai)},
+              },
+              'alignment_counts': {
+                  'records': samtools_count('view', '-c', output_bam),
+                  'paired_records': samtools_count('view', '-c', '-f', '1', output_bam),
+              },
+          }
+          with open(manifest_path, 'w', encoding='utf-8') as manifest_handle:
+              json.dump(manifest, manifest_handle, indent=2, sort_keys=True)
+              manifest_handle.write('\n')
+          PY
