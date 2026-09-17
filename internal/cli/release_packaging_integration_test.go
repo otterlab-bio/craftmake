@@ -4,11 +4,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestMakeReleaseBuildsPortableLinuxArchives(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("release archives target linux/amd64 and the packaged binary is executed by this test; skipping on %s", runtime.GOOS)
+	}
 	repositoryRoot := resolveRepositoryRoot(t)
 	temporaryDirectory := t.TempDir()
 	distributionDirectory := filepath.Join(temporaryDirectory, "dist")
