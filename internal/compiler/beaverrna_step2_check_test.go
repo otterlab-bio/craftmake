@@ -65,8 +65,15 @@ func TestCompileBeaverRNAStep2CheckFixture(t *testing.T) {
 	if splicingTask == nil || len(splicingTask.Dependencies) != 2 {
 		t.Fatalf("unexpected RNA splicing aggregation: %#v", splicingTask)
 	}
-	if !strings.Contains(splicingTask.Steps[0].Command, "matsrun run") || !strings.Contains(splicingTask.Steps[0].Command, "--pdxmode 0") {
-		t.Fatalf("unexpected RNA splicing command: %s", splicingTask.Steps[0].Command)
+	for _, requiredFragment := range []string{
+		"matsrun run",
+		"--pdxmode 0",
+		"--seqlengthQC 'workflow/fastqc_clean'",
+		"--seqlength-qc-format fastqcx",
+	} {
+		if !strings.Contains(splicingTask.Steps[0].Command, requiredFragment) {
+			t.Fatalf("RNA splicing command does not contain %q:\n%s", requiredFragment, splicingTask.Steps[0].Command)
+		}
 	}
 
 	qcSummaryTask := plan.TaskByID["BeaverRNA/step2-check/qc_summary"]

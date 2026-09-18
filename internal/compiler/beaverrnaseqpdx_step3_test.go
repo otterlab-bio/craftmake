@@ -62,8 +62,15 @@ func TestCompileBeaverRNASEQPDXStep3Fixture(t *testing.T) {
 		t.Fatalf("unexpected splicing resources: %#v", splicingTask.Resources)
 	}
 	splicingCommand := splicingTask.Steps[0].Command
-	if !strings.Contains(splicingCommand, "matsrun run") || !strings.Contains(splicingCommand, "--pdxmode 1") {
-		t.Fatalf("unexpected RNA-seq PDX splicing command: %q", splicingCommand)
+	for _, requiredFragment := range []string{
+		"matsrun run",
+		"--pdxmode 1",
+		"--seqlengthQC 'workflow/fastqc_clean'",
+		"--seqlength-qc-format fastqcx",
+	} {
+		if !strings.Contains(splicingCommand, requiredFragment) {
+			t.Fatalf("RNA-seq PDX splicing command does not contain %q: %q", requiredFragment, splicingCommand)
+		}
 	}
 	if !strings.Contains(splicingCommand, `"status": "produced"`) || !strings.Contains(splicingCommand, `"status": "not_applicable"`) {
 		t.Fatalf("splicing command should emit a typed produced/not_applicable outcome: %q", splicingCommand)

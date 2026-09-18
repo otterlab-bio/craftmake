@@ -101,6 +101,7 @@ shift
 root_directory=""
 pdata_path=""
 qc_directory=""
+qc_format=""
 annotation_path=""
 pdx_mode=""
 while [ "$#" -gt 0 ]; do
@@ -108,13 +109,14 @@ while [ "$#" -gt 0 ]; do
     --root) root_directory="$2"; shift 2 ;;
     --pdata) pdata_path="$2"; shift 2 ;;
     --seqlengthQC) qc_directory="$2"; shift 2 ;;
+    --seqlength-qc-format) qc_format="$2"; shift 2 ;;
     --gtf) annotation_path="$2"; shift 2 ;;
     --pdxmode) pdx_mode="$2"; shift 2 ;;
     --threads) shift 2 ;;
     *) shift ;;
   esac
 done
-if [ ! -d "$root_directory" ] || [ ! -f "$pdata_path" ] || [ ! -d "$qc_directory" ] || [ ! -f "$annotation_path" ] || [ "$pdx_mode" != "1" ]; then exit 3; fi
+if [ ! -d "$root_directory" ] || [ ! -f "$pdata_path" ] || [ ! -f "$qc_directory/sample-a_val_1_fastqcx/fastqc_data.txt" ] || [ "$qc_format" != "fastqcx" ] || [ ! -f "$annotation_path" ] || [ "$pdx_mode" != "1" ]; then exit 3; fi
 mkdir -p "$root_directory/RNASplicing"
 printf 'event\tvalue\nSE\t1\n' > "$root_directory/RNASplicing/events.tsv"
 `)
@@ -126,6 +128,8 @@ func writeBeaverRNASEQPDXStep3ProjectFixture(t *testing.T, projectDirectory stri
 		"workflow/bsmap/Filtered_bams/sample-a_fixed_human_Filtered.bam",
 		"workflow/bsmap/Filtered_bams/sample-b_fixed_human_Filtered.bam",
 		"workflow/QC/.keep",
+		"workflow/fastqc_clean/sample-a_val_1_fastqcx/fastqc_data.txt",
+		"workflow/fastqc_clean/sample-b_val_2_fastqcx/fastqc_data.txt",
 		"config/pdata.xlsx",
 		"references/human.fasta",
 		"references/mouse.fasta",
@@ -160,6 +164,7 @@ directories:
   methylation_call: workflow/expression
   qc:
     main: workflow/QC
+    after: workflow/fastqc_clean
   sid_log: workflow/log
 workflow:
   mode: RNASEQ
