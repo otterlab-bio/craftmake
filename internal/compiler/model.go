@@ -66,6 +66,7 @@ type Task struct {
 	Workflow            string                   `json:"workflow"`
 	Phase               string                   `json:"phase"`
 	Scope               string                   `json:"scope"`
+	Accelerator         string                   `json:"accelerator,omitempty"`
 	Dimensions          map[string]string        `json:"dimensions"`
 	Inputs              map[string][]string      `json:"inputs"`
 	Outputs             map[string]string        `json:"outputs"`

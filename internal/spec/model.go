@@ -39,6 +39,7 @@ type ObservabilitySpec struct {
 type JobSpec struct {
 	Name          string            `yaml:"name"`
 	Scope         string            `yaml:"scope"`
+	Accelerator   string            `yaml:"accelerator,omitempty"`
 	Dimensions    []string          `yaml:"dimensions"`
 	GroupBy       []string          `yaml:"group_by"`
 	Needs         []string          `yaml:"needs"`
@@ -66,6 +67,7 @@ type ResourceSpec struct {
 }
 
 type StepSpec struct {
+	ID          string            `yaml:"id"`
 	Name        string            `yaml:"name"`
 	Run         string            `yaml:"run"`
 	Shell       string            `yaml:"shell"`
@@ -96,6 +98,11 @@ func (workflow WorkflowSpec) Validate() error {
 }
 
 func (job JobSpec) validate(jobID string) error {
+	switch job.Accelerator {
+	case "", "cpu", "gpu", "tpu":
+	default:
+		return fmt.Errorf("job %q has invalid accelerator %q (want cpu, gpu, or tpu)", jobID, job.Accelerator)
+	}
 	switch job.Scope {
 	case "global", "sample", "batch":
 	default:

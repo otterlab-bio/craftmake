@@ -13,9 +13,13 @@ type planDigests struct {
 }
 
 func calculatePlanDigests(configPath string, workflowPath string) (planDigests, error) {
-	configDigest, err := scheduler.DigestFile(configPath)
-	if err != nil {
-		return planDigests{}, err
+	var configDigest string
+	var err error
+	if configPath != "" {
+		configDigest, err = scheduler.DigestFile(configPath)
+		if err != nil {
+			return planDigests{}, err
+		}
 	}
 	workflowDigest, err := scheduler.DigestFile(workflowPath)
 	if err != nil {

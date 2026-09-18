@@ -32,6 +32,9 @@ are the ones the scheduler will honour.
 ## What it provides
 
 - Versioned workflow YAML and deterministic catalog routing.
+- Lightweight Action workflow mode (`craftmake action`) with strict parameter contracts (`${{ args.* }}`, `${{ env.* }}`, `${{ config.* }}`).
+- Google Colab remote execution backend with Jupyter WebSocket kernel protocol, automatic quota recovery (HTTP 412), and zero resource leakage.
+- Native Google Drive persistent mounting (`/content/drive/MyDrive/...`) with cloud write flushing.
 - Local execution with CPU, memory, and parallelism admission budgets.
 - Native SLURM submission with task-level resource envelopes and accounting refresh.
 - SQLite run/task/submission state, cache decisions, resume, cancellation, and reports.
@@ -109,6 +112,156 @@ to the resolved snapshot and cannot be overridden.
 plain run id is recorded, and executing a second phase collides with the first on the primary key,
 after which `resume --run <id>--<phase>` finds no rows. Callers that execute more than one phase of a
 single snapshot should pass `--gate`.
+## Action workflows and Google Colab execution
+
+Craftmake provides a lightweight **Action workflow mode** and a **Google Colab remote execution backend** with native Google Drive integration.
+
+### Action workflow mode (`craftmake action`)
+
+Action workflows live in flat `.craftmake/*.yaml` files in your project directory using the `craftmake.action/v1` schema.
+
+```yaml
+# .craftmake/hello.yaml
+schema_version: craftmake.action/v1
+name: hello
+backend: colab                  # default backend: local or colab
+inputs:
+  who:
+    default: world
+jobs:
+  greet:
+    steps:
+      - run: echo "hello ${{ args.who }} from colab"
+```
+
+#### Parameter source contracts
+
+Parameter substitutions enforce strict, explicit source namespaces:
+
+- `${{ args.<name> }}`: Explicit CLI arguments passed via `--arg KEY=VALUE` (or `--input`). Validated against action `inputs` declarations.
+- `${{ env.<NAME> }}`: Read-only snapshot of environment variables captured at execution start.
+- `${{ config.<name> }}`: Values from an associated workflow configuration file.
+
+#### Action CLI commands
+
+```bash
+# List available actions discovered under .craftmake/
+craftmake action list
+
+# Compile and preview execution plan without running
+craftmake action plan hello --arg who=Craftmake
+
+# Execute action locally
+craftmake action run hello --backend local --arg who=World
+
+# Execute action on Google Colab with a configured session
+craftmake action run hello --backend colab --colab-session gpu --arg who=World
+```
+
+---
+
+### Google Colab remote backend
+
+The `colab` backend executes tasks on real Google Cloud Colab CPU and GPU runtimes without external dependencies or heavy toolchains.
+
+#### Architectural highlights
+
+- **Standard Library RFC 6455 WebSocket**: Uses a minimal, pure Go RFC 6455 client supporting transparent TLS (`wss://`), custom proxy token headers (`X-Colab-Runtime-Proxy-Token`), and client identification (`X-Colab-Client-Agent: vscode`).
+- **Jupyter Kernel Protocol**: Connects to the Colab runtime proxy WebSocket channels (`/api/kernels/<kernel_id>/channels`), manages `execute_request`, parses `stream`, `display_data`, and `error` envelopes, and coordinates graceful kernel interruption.
+- **Dynamic Kernel Discovery**: Queries `GET /api/kernels` or initializes sessions via `POST /api/sessions` / `POST /api/kernels` with automatic fallback.
+- **Zero Resource Leakage**: Enforces strict lifecycle management—machines are assigned on `BeginRun` and automatically released with verified unassign choreography on `EndRun`.
+- **412 Quota Recovery**: Detects Google Colab free-tier concurrent assignment limits (HTTP 412 `TooManyAssignmentsError`), scans existing dangling assignments, and cleans them up automatically before retrying.
+- **Local Observability Materialization**: Real-time streams from Jupyter cells are captured and written to local task log files (`step-0.stdout`, `step-0.stderr`) and `result.json` in the state directory.
+
+---
+
+### Session authentication & management
+
+Colab sessions store credentials and Drive mount preferences in `~/.config/craftmake/colab-auth.json` (0600 file permissions).
+
+#### 1. Interactive OAuth Login
+
+```bash
+# Login via browser OAuth loopback flow
+craftmake colab auth login --session gpu
+```
+
+- Binds an ephemeral local port on `127.0.0.1`.
+- Uses a runtime-configured Google OAuth client with the `https://www.googleapis.com/auth/colaboratory` scope; set `CRAFTMAKE_COLAB_CLIENT_ID` and `CRAFTMAKE_COLAB_CLIENT_SECRET` or pass the CLI flags.
+- Automatically stores the refresh token in `~/.config/craftmake/credentials/<session>.json` (`0600`).
+- **Login once, run indefinitely**: Subsequent runs transparently refresh access tokens in under 0.5s without browser prompts.
+
+#### 2. Inspect and Check Health
+
+```bash
+# View non-secret session configuration
+craftmake colab auth show --session gpu
+
+# Check offline session readiness and credential files
+craftmake colab doctor --session gpu
+```
+
+---
+
+### Google Drive integration
+
+Craftmake supports mounting your personal Google Drive as a durable remote workspace (`/content/drive/MyDrive/<root>`).
+
+#### 1. One-time Drive Authorization
+
+Google Colab requires explicit user consent to access Google Drive files. Authorize once per account:
+
+```bash
+# Trigger interactive Drive mount authorization
+craftmake colab drive mount --session gpu --authorize
+```
+
+1. The CLI displays Google's official Drive authorization URL and opens your default browser.
+2. Sign in with your Google account and click **Allow**.
+3. Return to the terminal and press **Enter** (or wait for auto-detection).
+4. Drive authorization is confirmed and bound.
+
+#### 2. Automatic Mount & Cloud Persistence in Workflows
+
+In your action workflow, files under `/content/drive` are automatically mounted and flushed:
+
+```yaml
+# .craftmake/drive_hello.yaml
+schema_version: craftmake.action/v1
+name: drive_hello
+backend: colab
+jobs:
+  drive_test:
+    steps:
+      - run: |
+          python3 - << 'EOF'
+          import os
+          from pathlib import Path
+          from google.colab import drive
+
+          # Google Drive is auto-mounted by bootstrap when drive_root is configured
+          drive_dir = Path('/content/drive/MyDrive/craftmake')
+          drive_dir.mkdir(parents=True, exist_ok=True)
+
+          hello_file = drive_dir / 'helloworld.txt'
+          hello_file.write_text('helloworld from craftmake colab!')
+          print('Created cloud file:', hello_file)
+
+          # Flush all writes to Google Drive cloud storage
+          drive.flush_and_unmount()
+          print('Flushed to cloud successfully!')
+          EOF
+```
+
+Execute the action:
+
+```bash
+craftmake action run drive_hello --backend colab --colab-session gpu --force
+```
+
+The file is written directly to your Google Drive and is immediately accessible from the web, mobile app, or subsequent workflow runs.
+
+The exact workflow phase, backend, resource envelope, and reference identity for an `otter.run/v1` snapshot are resolved before execution. By default, mutable overrides (`--backend`, `--run-id`, `--partition`, `--account`, `--qos`, `--time`, `--scratch-root`) are allowed. Pass `--gate` to `run` or `resume` to enforce the immutable layer: backend, run identity, and SLURM resources are then fixed to the resolved snapshot and cannot be overridden.
 
 ```bash
 # Mutable overrides are allowed by default.

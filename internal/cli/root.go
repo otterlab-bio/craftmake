@@ -15,13 +15,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	actionadapter "github.com/otterlab-bio/craftmake/internal/adapters/action"
 	"github.com/otterlab-bio/craftmake/internal/adapters/otter"
 	"github.com/otterlab-bio/craftmake/internal/adapters/standalone"
 	"github.com/otterlab-bio/craftmake/internal/backend"
+	colabpkg "github.com/otterlab-bio/craftmake/internal/backend/colab"
 	"github.com/otterlab-bio/craftmake/internal/backend/local"
 	"github.com/otterlab-bio/craftmake/internal/backend/slurm"
 	"github.com/otterlab-bio/craftmake/internal/compiler"
 	"github.com/otterlab-bio/craftmake/internal/controllerlog"
+	"github.com/otterlab-bio/craftmake/internal/engine"
 	"github.com/otterlab-bio/craftmake/internal/report"
 	runtimeexecutor "github.com/otterlab-bio/craftmake/internal/runtime"
 	"github.com/otterlab-bio/craftmake/internal/scheduler"
@@ -86,7 +89,7 @@ func NewRootCommand(buildInfo BuildInfo) *cobra.Command {
 		SilenceErrors: true,
 		Version:       fmt.Sprintf("%s+%s (%s)", buildInfo.Version, buildInfo.Commit, buildInfo.Date),
 	}
-	commands := []*cobra.Command{newValidateCommand(), newPlanCommand(), newRunCommand(buildInfo), newStatusCommand(), newCancelCommand(), newReportCommand(), newLogsCommand(), newDoctorCommand(), newResumeCommand(buildInfo), newTaskRunnerCommand()}
+	commands := []*cobra.Command{newValidateCommand(), newPlanCommand(), newRunCommand(buildInfo), newActionCommand(buildInfo), newColabCommand(), newStatusCommand(), newCancelCommand(), newReportCommand(), newLogsCommand(), newDoctorCommand(), newResumeCommand(buildInfo), newTaskRunnerCommand()}
 	for _, command := range commands {
 		if command.Args == nil {
 			command.Args = noArguments
@@ -174,6 +177,8 @@ func newRunCommand(buildInfo BuildInfo) *cobra.Command {
 	var force bool
 	var dryRun bool
 	var runID string
+	var colabSessionID string
+	var colabAuthConfig string
 	command := &cobra.Command{Use: "run", Short: "Run a compiled workflow", RunE: func(command *cobra.Command, arguments []string) error {
 		plan, err := loadPlan(&options)
 		if err != nil {
@@ -231,11 +236,20 @@ func newRunCommand(buildInfo BuildInfo) *cobra.Command {
 			effectiveWorkers,
 			options.execution.Slurm.MaxJobs,
 		)
+		if backendName == "colab" && effectiveWorkers > 1 {
+			effectiveWorkers = 1
+		}
 		effectiveMaxCores := effectiveSchedulerMaxCores(backendName, maxCores, command.Flags().Changed("max-cores"))
 		var selectedBackend backend.Backend
 		switch backendName {
 		case "local":
 			selectedBackend = local.New()
+		case "colab":
+			colabBackend, colabErr := buildColabBackend(command.Context(), colabBackendConfig{SessionID: colabSessionID, AuthConfig: colabAuthConfig, ProjectDirectory: options.projectDir})
+			if colabErr != nil {
+				return configurationError(colabErr)
+			}
+			selectedBackend = colabBackend
 		case "slurm":
 			slurmBackend, configureErr := configuredSlurmBackendWithResources(
 				slurmPartition,
@@ -263,21 +277,19 @@ func newRunCommand(buildInfo BuildInfo) *cobra.Command {
 		if err != nil {
 			return usageError("invalid --max-memory value %q: %v", maxMemory, err)
 		}
-		stateStore, err := store.Open(command.Context(), databasePath)
-		if err != nil {
-			return stateFailureError(err)
-		}
-		defer stateStore.Close()
 		digests, err := calculatePlanDigests(options.configPath, options.workflowPath)
 		if err != nil {
 			return configurationError(err)
 		}
-		taskScheduler, err := scheduler.New(plan, stateStore, scheduler.Options{ProjectDirectory: projectDirectory, StateDirectory: stateDirectory, ConfigPath: options.configPath, ConfigDigest: digests.Config, WorkflowPath: options.workflowPath, WorkflowDigest: digests.Workflow, Backend: selectedBackend, MaxParallel: effectiveWorkers, MaxCores: effectiveMaxCores, MaxMemoryBytes: memoryBytes, Force: force, Version: buildInfo.Version, RunID: runID, LoaderKind: string(options.configKind)})
-		if err != nil {
-			return backendFailureError(err)
+		if runID == "" {
+			runID = defaultMutableRunID()
 		}
-		actualRunID, runErr := taskScheduler.Run(command.Context())
-		for _, logErr := range taskScheduler.ControllerLogErrors() {
+		runResult, runErr := engine.Run(command.Context(), engine.RunRequest{Plan: plan, DatabasePath: databasePath, ProjectDirectory: projectDirectory, StateDirectory: stateDirectory, ConfigPath: options.configPath, ConfigDigest: digests.Config, WorkflowPath: options.workflowPath, WorkflowDigest: digests.Workflow, Backend: selectedBackend, MaxParallel: effectiveWorkers, MaxCores: effectiveMaxCores, MaxMemoryBytes: memoryBytes, Force: force, Version: buildInfo.Version, RunID: runID, LoaderKind: string(options.configKind)})
+		if runResult.RunID == "" && runErr != nil {
+			return backendFailureError(runErr)
+		}
+		actualRunID := runResult.RunID
+		for _, logErr := range runResult.ControllerLogErrors {
 			fmt.Fprintf(command.ErrOrStderr(), "warning: controller log: %v\n", logErr)
 		}
 		status := "succeeded"
@@ -288,14 +300,14 @@ func newRunCommand(buildInfo BuildInfo) *cobra.Command {
 		if marshalErr != nil {
 			return internalFailureError(marshalErr)
 		}
-		envelope := protocol.NewCommandEnvelope("run", runErr == nil, actualRunID, databasePath, taskScheduler.ControllerLogPath(), payload)
+		envelope := protocol.NewCommandEnvelope("run", runErr == nil, actualRunID, databasePath, runResult.ControllerLogPath, payload)
 		if outputErr := writeCommandOutput(command, options.format, envelope, func() error {
 			fmt.Fprintf(
 				command.OutOrStdout(),
 				"run_id: %s\nstate: %s\ncontroller_log: %s\n",
 				actualRunID,
 				databasePath,
-				taskScheduler.ControllerLogPath(),
+				runResult.ControllerLogPath,
 			)
 			return nil
 		}); outputErr != nil {
@@ -304,7 +316,7 @@ func newRunCommand(buildInfo BuildInfo) *cobra.Command {
 		return taskFailureError(runErr)
 	}}
 	addPlanFlags(command, &options)
-	command.Flags().StringVar(&backendName, "backend", "", "Override the resolved execution backend (local/slurm)")
+	command.Flags().StringVar(&backendName, "backend", "", "Override the resolved execution backend (local/slurm/colab)")
 	command.Flags().StringVar(&slurmPartition, "partition", os.Getenv("CRAFTMAKE_SLURM_PARTITION"), "Override the Slurm partition (or set CRAFTMAKE_SLURM_PARTITION)")
 	command.Flags().StringVar(&slurmAccount, "account", "", "Slurm account")
 	command.Flags().StringVar(&slurmQOS, "qos", "", "Slurm quality of service")
@@ -320,6 +332,8 @@ func newRunCommand(buildInfo BuildInfo) *cobra.Command {
 	command.Flags().DurationVar(&slurmPendingTimeout, "slurm-pending-timeout", 0, "Cancel a Slurm job after this continuous pending duration, 0 disables")
 	command.Flags().BoolVar(&force, "force", false, "Ignore fingerprint cache")
 	command.Flags().BoolVar(&dryRun, "dry-run", false, "Compile and display the plan without executing")
+	command.Flags().StringVar(&colabSessionID, "colab-session", "", "Named Colab session used to build the backend")
+	command.Flags().StringVar(&colabAuthConfig, "colab-auth-config", "~/.config/craftmake/colab-auth.json", "Colab authentication config path")
 	command.Flags().BoolVar(&options.gateMode, "gate", false, "Enforce immutable backend, run identity, and Slurm resources")
 	command.Flags().StringVar(&runID, "run-id", "", "Override the resolved run identifier")
 	command.Flags().StringVar(&options.format, "format", "text", "Output format (text/json/jsonl)")
@@ -417,6 +431,8 @@ func newCancelCommand() *cobra.Command {
 	var statePath string
 	var runID string
 	var format string
+	var cancelColabSession string
+	var cancelColabAuthConfig string
 	command := &cobra.Command{Use: "cancel", Short: "Cancel a running workflow", RunE: func(command *cobra.Command, arguments []string) error {
 		stateStore, err := store.Open(command.Context(), statePath)
 		if err != nil {
@@ -436,7 +452,7 @@ func newCancelCommand() *cobra.Command {
 		if run.Status != "running" {
 			return usageError("run %s is not running (status: %s)", runID, run.Status)
 		}
-		selectedBackend, err := backendForName(run.Backend)
+		selectedBackend, err := backendForNameWithColab(command.Context(), run.Backend, colabBackendConfig{SessionID: cancelColabSession, AuthConfig: cancelColabAuthConfig, ProjectDirectory: filepath.Dir(run.ConfigPath)})
 		if err != nil {
 			return err
 		}
@@ -556,6 +572,8 @@ func newCancelCommand() *cobra.Command {
 	command.Flags().StringVar(&statePath, "state", "workflow/.craftmake/state.sqlite", "State database path")
 	command.Flags().StringVar(&runID, "run", "latest", "Run identifier")
 	command.Flags().StringVar(&format, "format", "text", "Output format (text/json/jsonl)")
+	command.Flags().StringVar(&cancelColabSession, "colab-session", "", "Named Colab session used to rebuild the backend")
+	command.Flags().StringVar(&cancelColabAuthConfig, "colab-auth-config", "~/.config/craftmake/colab-auth.json", "Colab authentication config path")
 	return command
 }
 
@@ -887,13 +905,24 @@ func newLogsCommand() *cobra.Command {
 
 func newDoctorCommand() *cobra.Command {
 	var backendName string
+	var colabSessionID string
+	var colabAuthConfig string
 	command := &cobra.Command{Use: "doctor", Short: "Check runtime dependencies", RunE: func(command *cobra.Command, arguments []string) error {
-		if backendName != "local" && backendName != "slurm" {
-			return usageError("unsupported backend %q", backendName)
-		}
-		if backendName == "local" {
+		switch backendName {
+		case "local":
 			fmt.Fprintf(command.OutOrStdout(), "local: ok\ngnu_time: %t\nenva_or_conda: optional\n", fileExists("/usr/bin/time"))
 			return nil
+		case "colab":
+			configPath, pathErr := expandUserPath(colabAuthConfig)
+			if pathErr != nil {
+				return usageError("invalid --colab-auth-config: %v", pathErr)
+			}
+			if _, loadErr := colabpkg.LoadSessionAuth(configPath, colabSessionID); loadErr != nil {
+				return backendFailureError(fmt.Errorf("Colab session %q is not ready: %v", colabSessionID, loadErr))
+			}
+			fmt.Fprintf(command.OutOrStdout(), "colab: ok\nsession: %s\nauth_config: %s\n", colabSessionID, configPath)
+			return nil
+		case "slurm":
 		}
 		missing := []string{}
 		for _, executable := range []string{"sinfo", "sbatch", "squeue", "sacct", "scancel", "srun"} {
@@ -908,6 +937,8 @@ func newDoctorCommand() *cobra.Command {
 		return nil
 	}}
 	command.Flags().StringVar(&backendName, "backend", "local", "Backend to check")
+	command.Flags().StringVar(&colabSessionID, "colab-session", "", "Named Colab session to check")
+	command.Flags().StringVar(&colabAuthConfig, "colab-auth-config", "~/.config/craftmake/colab-auth.json", "Colab authentication config path")
 	return command
 }
 
@@ -926,6 +957,8 @@ func newResumeCommand(buildInfo BuildInfo) *cobra.Command {
 	var format string
 	var legacyConfig bool
 	var gateMode bool
+	var resumeColabSession string
+	var resumeColabAuthConfig string
 	command := &cobra.Command{Use: "resume", Short: "Recover and resume a prior run using its workflow, config, and backend", RunE: func(command *cobra.Command, arguments []string) error {
 		stateStore, err := store.Open(command.Context(), statePath)
 		if err != nil {
@@ -972,6 +1005,12 @@ func newResumeCommand(buildInfo BuildInfo) *cobra.Command {
 		switch run.Backend {
 		case "local":
 			selectedBackend = local.New()
+		case "colab":
+			colabBackend, colabErr := buildColabBackend(command.Context(), colabBackendConfig{SessionID: resumeColabSession, AuthConfig: resumeColabAuthConfig, ProjectDirectory: projectDirectory})
+			if colabErr != nil {
+				return configurationError(colabErr)
+			}
+			selectedBackend = colabBackend
 		case "slurm":
 			partition, account, qos, defaultTime, scratchRoot, resolveErr := resolveSlurmExecutionOptions(
 				command,
@@ -1101,6 +1140,8 @@ func newResumeCommand(buildInfo BuildInfo) *cobra.Command {
 	command.Flags().BoolVar(&gateMode, "gate", false, "Enforce immutable backend and Slurm resources")
 	command.Flags().BoolVar(&legacyConfig, "legacy-config", false, "Load the stored configuration through the legacy compatibility adapter")
 	_ = command.Flags().MarkHidden("legacy-config")
+	command.Flags().StringVar(&resumeColabSession, "colab-session", "", "Named Colab session used to rebuild the backend")
+	command.Flags().StringVar(&resumeColabAuthConfig, "colab-auth-config", "~/.config/craftmake/colab-auth.json", "Colab authentication config path")
 	return command
 }
 
@@ -1135,7 +1176,28 @@ func addPlanFlags(command *cobra.Command, options *commonOptions) {
 }
 
 func loadPlan(options *commonOptions) (*compiler.Plan, error) {
-	if options.configPath == "" {
+	if options.configPath == "" && options.workflowPath != "" {
+		kind, detectErr := standalone.DetectConfigKind(options.workflowPath)
+		if detectErr == nil && kind == standalone.ConfigKindAction {
+			projectDir := options.projectDir
+			if projectDir == "" {
+				projectDir = filepath.Dir(filepath.Dir(options.workflowPath))
+			}
+			stateDir := options.stateDir
+			if stateDir == "" {
+				stateDir = filepath.Join(projectDir, ".craftmake", "state")
+			}
+			loaded, loadErr := actionadapter.Load(options.workflowPath, nil, projectDir, stateDir)
+			if loadErr != nil {
+				return nil, configurationError(loadErr)
+			}
+			plan, compileErr := compiler.Compile(loaded.Workflow, loaded.Context)
+			if compileErr != nil {
+				return nil, compilationError(compileErr)
+			}
+			options.projectDir, options.stateDir, options.configKind, options.resolvedBackend, options.execution = projectDir, stateDir, kind, loaded.Context.Workflow.Backend, loaded.Context.Execution
+			return plan, nil
+		}
 		return nil, usageError("--config is required")
 	}
 	absoluteConfigPath, err := filepath.Abs(options.configPath)
@@ -1341,7 +1403,11 @@ func printPlan(command *cobra.Command, plan *compiler.Plan) {
 	fmt.Fprintf(command.OutOrStdout(), "Workflow: %s\nPhase: %s\nTasks: %d\nSubmissions: %d\n\n", plan.Workflow, plan.Phase, len(plan.Tasks), len(plan.Submissions))
 	for orderIndex, taskID := range plan.Order {
 		task := plan.TaskByID[taskID]
-		fmt.Fprintf(command.OutOrStdout(), "%03d  %-8s  cores=%d  memory=%d  %s\n", orderIndex+1, task.Scope, task.Resources.Cores, task.Resources.MemoryByte, task.ID)
+		accel := task.Accelerator
+		if accel == "" {
+			accel = "-"
+		}
+		fmt.Fprintf(command.OutOrStdout(), "%03d  %-8s  accel=%-4s  cores=%d  memory=%d  %s\n", orderIndex+1, task.Scope, accel, task.Resources.Cores, task.Resources.MemoryByte, task.ID)
 		if len(task.Dependencies) > 0 {
 			fmt.Fprintf(command.OutOrStdout(), "     needs: %s\n", strings.Join(task.Dependencies, ", "))
 		}

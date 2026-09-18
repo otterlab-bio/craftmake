@@ -14,6 +14,7 @@ const (
 	ConfigKindOtterRun   ConfigKind = "otter-run"
 	ConfigKindLegacy     ConfigKind = "legacy-otter"
 	ConfigKindStandalone ConfigKind = "standalone"
+	ConfigKindAction     ConfigKind = "craftmake.action/v1"
 )
 
 // DetectConfigKind chooses a loader without accepting ambiguous configurations.
@@ -35,6 +36,8 @@ func DetectConfigKind(path string) (ConfigKind, error) {
 			return ConfigKindOtterRun, nil
 		case SchemaVersion:
 			return ConfigKindStandalone, nil
+		case string(ConfigKindAction):
+			return ConfigKindAction, nil
 		default:
 			return "", fmt.Errorf("configuration %q has unsupported schema_version %q; expected %q or %q", path, schemaVersion, "otter.run/v1", SchemaVersion)
 		}

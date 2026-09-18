@@ -1,0 +1,27 @@
+schema_version: craftmake.action/v1
+name: drive_hello
+backend: colab
+jobs:
+  drive_test:
+    steps:
+      - run: |
+          python3 - << 'EOF'
+          import os
+          from pathlib import Path
+          print('=== Google Drive Status ===')
+          is_mounted = os.path.ismount('/content/drive')
+          print('is_mounted:', is_mounted)
+          drive_base = Path('/content/drive/MyDrive')
+          if not drive_base.exists():
+              drive_base = Path('/content/drive/My Drive')
+          craftmake_dir = drive_base / 'craftmake'
+          craftmake_dir.mkdir(parents=True, exist_ok=True)
+          hello_file = craftmake_dir / 'helloworld.txt'
+          hello_file.write_text('helloworld from craftmake colab!')
+          print('File created successfully:', hello_file)
+          print('File content:', hello_file.read_text().strip())
+          from google.colab import drive
+          print('Flushing writes to Google Drive cloud...')
+          drive.flush_and_unmount()
+          print('Flushed and unmounted successfully!')
+          EOF

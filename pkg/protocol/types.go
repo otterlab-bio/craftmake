@@ -5,10 +5,11 @@ import "time"
 const Version = 2
 
 type ResourceRequest struct {
-	Cores      int    `json:"cores"`
-	MemoryByte int64  `json:"memory_bytes"`
-	Partition  string `json:"partition,omitempty"`
-	Time       string `json:"time,omitempty"`
+	Cores       int    `json:"cores"`
+	MemoryByte  int64  `json:"memory_bytes"`
+	Partition   string `json:"partition,omitempty"`
+	Time        string `json:"time,omitempty"`
+	Accelerator string `json:"accelerator,omitempty"`
 }
 
 type StepManifest struct {
