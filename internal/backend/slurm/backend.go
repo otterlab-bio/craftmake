@@ -396,8 +396,7 @@ run_worker_with_retry() {
             return "$worker_exit_code"
         fi
         local recent_error
-        recent_error="$(tail -n 20 "$launch_error_path" 2>/dev/null || true)"
-        recent_error="${recent_error,,}"
+        recent_error="$(tail -n 20 "$launch_error_path" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
         case "$recent_error" in
             *"unable to create step"*|*"slurm_receive_msg"*|*"socket timed out"*|*"temporarily unable"*|*"resource temporarily unavailable"*)
                 ;;

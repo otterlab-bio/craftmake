@@ -95,6 +95,29 @@ func (localBackend *Backend) RunSubmission(ctx context.Context, executable strin
 	return &backend.SubmissionResult{BackendID: backendID, Tasks: outcomes}, nil
 }
 
+var (
+	verboseTimeOnce sync.Once
+	verboseTime     string
+)
+
+// verboseTimePath reports a `time` binary that supports GNU-style
+// `-v -o <file>` metrics capture, or "" when none is usable. Existence of
+// /usr/bin/time is not enough: the BSD implementation shipped on macOS
+// rejects -v, which would fail the task before the runner even starts.
+func verboseTimePath() string {
+	verboseTimeOnce.Do(func() {
+		timePath, lookupErr := exec.LookPath("/usr/bin/time")
+		if lookupErr != nil {
+			return
+		}
+		probe := exec.Command(timePath, "-v", "-o", os.DevNull, timePath, "--version")
+		if probe.Run() == nil {
+			verboseTime = timePath
+		}
+	})
+	return verboseTime
+}
+
 func (localBackend *Backend) runTask(ctx context.Context, executable string, manifest *protocol.TaskManifest) (*backend.Result, error) {
 	if err := os.MkdirAll(manifest.RuntimeDirectory, 0o755); err != nil {
 		return nil, err
@@ -110,7 +133,7 @@ func (localBackend *Backend) runTask(ctx context.Context, executable string, man
 	metricsPath := filepath.Join(manifest.RuntimeDirectory, "metrics.raw")
 	arguments := []string{"__task-runner", "--manifest", manifestPath}
 	commandName := executable
-	if timePath, lookupErr := exec.LookPath("/usr/bin/time"); lookupErr == nil {
+	if timePath := verboseTimePath(); timePath != "" {
 		commandName = timePath
 		arguments = append([]string{"-v", "-o", metricsPath, executable}, arguments...)
 	}

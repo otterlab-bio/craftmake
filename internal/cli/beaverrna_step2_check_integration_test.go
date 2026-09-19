@@ -162,14 +162,18 @@ set -euo pipefail
 if [ "$1" != "run" ]; then exit 2; fi
 shift
 root_directory=""
+qc_directory=""
+qc_format=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root_directory="$2"; shift 2 ;;
-    --threads|--pdata|--seqlengthQC|--gtf|--pdxmode) shift 2 ;;
+    --seqlengthQC) qc_directory="$2"; shift 2 ;;
+    --seqlength-qc-format) qc_format="$2"; shift 2 ;;
+    --threads|--pdata|--gtf|--pdxmode) shift 2 ;;
     *) shift ;;
   esac
 done
-if [ ! -d "$root_directory" ]; then exit 3; fi
+if [ ! -d "$root_directory" ] || [ ! -f "$qc_directory/sample-a_val_1_fastqcx/fastqc_data.txt" ] || [ "$qc_format" != "fastqcx" ]; then exit 3; fi
 mkdir -p "$root_directory/RNASplicing"
 printf 'event\tvalue\nSE\t1\n' > "$root_directory/RNASplicing/events.tsv"
 `)

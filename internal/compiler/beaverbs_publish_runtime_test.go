@@ -85,7 +85,8 @@ case "${2:-}" in
     configuration_path="${3:?missing run configuration}"
     manifest_path="$(dirname "$configuration_path")/results/artifacts.json"
     test -f "$manifest_path"
-    test "$(stat -c '%a' "$manifest_path")" = 444
+    manifest_mode="$(stat -c '%a' "$manifest_path" 2>/dev/null || stat -f '%Lp' "$manifest_path")"
+    test "$manifest_mode" = 444
     printf 'verify\n' >> "${OTTER_TEST_LOG:?missing OTTER_TEST_LOG}"
     ;;
   *)

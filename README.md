@@ -38,6 +38,24 @@ are the ones the scheduler will honour.
 - Immutable `otter.run/v1` input/reference boundary and create-only artifact publication.
 - Structured run IDs, JSON output, failure classification, and reproducible evidence.
 
+## CLI map
+
+| Command | Purpose |
+| --- | --- |
+| `doctor` | Check Local/SLURM runtime dependencies. |
+| `validate` | Load and compile without writing run state. |
+| `plan` | Emit the resolved DAG without executing tasks. |
+| `run` | Execute a phase and persist SQLite/controller state. |
+| `status` / `logs` | Inspect one persisted run identity and its logs. |
+| `report` | Export timings and resource metrics. |
+| `resume` / `cancel` | Recover or stop a phase-scoped run. |
+| `completion` | Generate shell completion. |
+
+`validate`, `plan`, and `run` use `--state-dir`; addressing commands use
+`--state <state.sqlite>` plus `--run`. Most commands support
+`--format text|json|jsonl`. For immutable Otter runs, always pass `--gate` to
+`run` and `resume`.
+
 ## Where it fits
 
 ```text
@@ -132,14 +150,14 @@ Craftmake can download, build, and publish an immutable reference genome release
 ```bash
 craftmake plan \
   --reference-build-config \
-  --config reference-build.yaml \
+  --config configs/reference-build.yaml \
   --workflow workflows/ReferenceBuild/build.yaml \
   --phase build \
   --catalog workflows/
 
 craftmake run \
   --reference-build-config \
-  --config reference-build.yaml \
+  --config configs/reference-build.yaml \
   --workflow workflows/ReferenceBuild/build.yaml \
   --phase build \
   --catalog workflows/ \
@@ -167,7 +185,10 @@ Current catalog families include:
 - `BeaverRNASEQPDX` — RNA-PDX phases;
 - `SRAArchiveDecode` — validated archive decode and paired-FASTQ publication.
 
-See [benchmark evidence](doc/benchmarks/README.md) for the reproducible PDX controller-reconciliation dataset and generator.
+See the [archived Gate 6 benchmark evidence](doc/benchmarks/README.md) for a
+bounded historical PDX controller-reconciliation result. Its immutable source
+dataset is held in the internal evidence archive, so it is not a
+public-checkout reproducibility claim.
 
 ## Operational limits
 
@@ -181,7 +202,6 @@ See [benchmark evidence](doc/benchmarks/README.md) for the reproducible PDX cont
 ```bash
 go test ./...
 go vet ./...
-make benchmark-pdx-scheduler
 ```
 
 The repository uses Go 1.26.x as declared in `go.mod`. Each source revision is independent from the parent `otter` checkout; update the parent gitlink only when intentionally integrating a new revision.
