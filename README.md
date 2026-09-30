@@ -377,21 +377,30 @@ craftmake colab drive logout --session gpu    # forget it
 craftmake action run drive_hello --backend colab --force
 ```
 
-- `CRAFTMAKE_COLAB_DRIVE_MOUNT` selects `auto` (default: mount when a credential
-  is present), `drivefs` (always attempt) or `off`.
+- `CRAFTMAKE_COLAB_DRIVE_MOUNT` selects `off` (default), `auto` (mount when a
+  credential is present) or `drivefs` (always attempt). Mounting is expected to
+  fail with a third-party client; see the limitation below.
 - The default Drive client is rclone's public installed-app client; override it
   with `CRAFTMAKE_COLAB_DRIVE_CLIENT_ID`/`_SECRET`, `--client-id`/`--client-secret`,
   or `make build DRIVE_CLIENT_ID=... DRIVE_CLIENT_SECRET=...`.
 - The refresh token (not a short-lived access token) is embedded in the
   bootstrap cell so the metadata shim can refresh it in place; the notebook is
   never written to disk.
-- **Status: the mount does not yet succeed against the live service.** A real
-  run reaches the DriveFS binary and starts it, but it exits with `rc=12`
-  (`OnCoreTerminated`) after only a benign `global_feature_config` `NOT_FOUND`
-  line, so `/content/drive` stays unmounted. The environment is otherwise ready
-  (binary present, `/dev/fuse` present, root, the binary runs). Treat DriveFS
-  mounting as experimental and use `sync_out` as the reliable path until the
-  launch is matched against a known-working invocation.
+- **Status: mounting is not achievable without the Colab frontend, and the
+  investigation is closed.** A live run with a valid Drive-scoped credential and a
+  metadata shim that DriveFS accepted (all three of its requests - the
+  `guest-attributes/auth/user-id` identity, the account email and a freshly
+  refreshed access token - answered 200) still ended in
+  `CANNOT_INIT_CELLOFS: PERMISSION_DENIED: Failed to initialize sync engine` and
+  `rc=12` (`CANNOT_START_CORE`). DriveFS's sync engine calls Google-internal Drive
+  APIs that reject a token minted by a third-party OAuth client; only the Colab
+  frontend can obtain a suitably scoped token. `CRAFTMAKE_COLAB_DRIVE_MOUNT`
+  therefore defaults to `off`, and `drivefs` is only for experimentation.
+- **What does work: the Drive REST API.** With the same Drive-scoped credential,
+  `drive/v3` succeeds against the live account (verified: `about` reports the
+  account and quota, a file was created, read back and deleted). Persisting to
+  Drive through the REST API is the supported path; `sync_in`/`sync_out` remain
+  the transport that needs no Drive at all.
 - When the runtime has no DriveFS binary, or the mount does not appear in time
   (`CRAFTMAKE_COLAB_DRIVE_MOUNT_TIMEOUT_SECONDS`, default 90), the run does
   **not** fail: it prints a notice, records it in the result's

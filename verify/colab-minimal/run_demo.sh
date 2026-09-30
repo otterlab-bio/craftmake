@@ -316,7 +316,7 @@ echo "==> phase 5: DriveFS mount is attempted and degrades gracefully"
 # A Drive credential makes the bootstrap try to mount Drive with DriveFS. The
 # emulator has no /opt/google/drive/drive binary, so the generated code must
 # report that and let the run continue instead of failing the task.
-CRAFTMAKE_DRIVE_REFRESH_TOKEN="dummy-drive-refresh-token" "$CRAFTMAKE" action run drive_mount_probe --backend colab \
+CRAFTMAKE_COLAB_DRIVE_MOUNT=drivefs CRAFTMAKE_DRIVE_REFRESH_TOKEN="dummy-drive-refresh-token" "$CRAFTMAKE" action run drive_mount_probe --backend colab \
   --colab-auth-config "$AUTH_CONFIG" --dir "$PROJECT" --force \
   < /dev/null > "$STATE/action-drivefs.out" 2>&1
 assert_rc "run with a Drive credential exits 0" "$?" "0"

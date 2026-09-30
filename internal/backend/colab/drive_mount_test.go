@@ -9,15 +9,17 @@ import (
 
 func TestNormalizeDriveMountMode(t *testing.T) {
 	cases := map[string]string{
-		"":         DriveMountAuto,
-		"auto":     DriveMountAuto,
-		"whatever": DriveMountAuto,
-		"drivefs":  DriveMountDriveFS,
-		"on":       DriveMountDriveFS,
-		"1":        DriveMountDriveFS,
+		// Mounting is off unless asked for: a third-party client cannot satisfy
+		// DriveFS, so attempting it by default only wastes the mount timeout.
+		"":         DriveMountOff,
+		"whatever": DriveMountOff,
 		"off":      DriveMountOff,
 		"skip":     DriveMountOff,
 		"0":        DriveMountOff,
+		"auto":     DriveMountAuto,
+		"drivefs":  DriveMountDriveFS,
+		"on":       DriveMountDriveFS,
+		"1":        DriveMountDriveFS,
 	}
 	for input, want := range cases {
 		if got := NormalizeDriveMountMode(input); got != want {

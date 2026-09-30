@@ -32,14 +32,20 @@ const (
 const defaultDriveMountTimeoutSeconds = 90
 
 // NormalizeDriveMountMode maps operator input onto a known mode.
+// NormalizeDriveMountMode maps operator input onto a known mode.
+//
+// The default is off: a live investigation showed that DriveFS cannot be mounted
+// with a third-party OAuth client (see BuildDriveFSMountSource), so attempting it
+// on every run would only cost the mount timeout before falling back. `auto`
+// remains available for the case where a credential can satisfy DriveFS.
 func NormalizeDriveMountMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case DriveMountOff, "skip", "disabled", "false", "0":
-		return DriveMountOff
-	case DriveMountDriveFS, "on", "true", "1":
+	case DriveMountAuto, "if-available":
+		return DriveMountAuto
+	case DriveMountDriveFS, "on", "true", "1", "drivefs-only":
 		return DriveMountDriveFS
 	default:
-		return DriveMountAuto
+		return DriveMountOff
 	}
 }
 
@@ -70,6 +76,15 @@ type DriveMountSpec struct {
 // the mount to appear. This is the mechanism reference implementations use,
 // because Colab's own drive.mount() needs the Colab frontend and cannot work
 // over a bare kernel WebSocket.
+//
+// Verified limitation: DriveFS's sync engine (CelloFS) calls Google-internal
+// Drive APIs that reject a token minted by a third-party OAuth client. A live run
+// with a valid Drive-scoped credential and a correct metadata shim reached
+// `CANNOT_INIT_CELLOFS: PERMISSION_DENIED: Failed to initialize sync engine` and
+// exited rc=12 (CANNOT_START_CORE), so mounting is not achievable without the
+// Colab frontend, which is the only party able to obtain a suitably scoped token.
+// The Drive REST API v3 does work with the same credential, and is the supported
+// way to persist to Drive.
 //
 // The code is deliberately non-fatal: when the runtime has no DriveFS binary or
 // the mount does not appear, it reports the reason and returns so the caller can
@@ -133,7 +148,14 @@ class _MetadataHandler(_Handler):
                     "scope": _SCOPES,
                     "token_type": "Bearer",
                 }))
-            elif "/email" in self.path or "guest-attributes" in self.path:
+            elif "guest-attributes" in self.path:
+                # DriveFS asks for
+                # /computeMetadata/v1/instance/guest-attributes/auth/user-id
+                # to decide which account this runtime belongs to; the runtime's
+                # own credential server answers 404 without a Colab frontend, so
+                # the shim answers it here.
+                self._send(_USER_EMAIL, "text/plain")
+            elif "/email" in self.path:
                 self._send(_USER_EMAIL, "text/plain")
             elif "/scopes" in self.path:
                 self._send(_SCOPES, "text/plain")
@@ -195,14 +217,24 @@ def _mount_drive():
             pass
         _detail = ""
         try:
+            # The binary's own stdout mostly carries the global feature config
+            # complaint. The actionable reason is in the DriveFS log.
             _log.flush()
             with open(_log_path, "rb") as _reader:
-                _log_text = _reader.read().decode("utf-8", "replace")
-            # The reason is usually at the start of the log; the tail only shows
-            # the shutdown. Keep both ends.
-            _detail = (_log_text[:900] + " ... " + _log_text[-600:]).strip()
+                _stdout_text = _reader.read().decode("utf-8", "replace")
+            _detail = _stdout_text.strip()[-300:]
+            _fs_log = os.path.join(os.path.expanduser("~"), ".config", "Google", "DriveFS", "Logs", "drive_fs.txt")
+            with open(_fs_log, "rb") as _reader:
+                _fs_text = _reader.read().decode("utf-8", "replace")
+            _keys = ("permission_denied", "cannot_init", "handleauthstatus", "failed to initialize", "return code")
+            _interesting = [line for line in _fs_text.splitlines() if any(k in line.lower() for k in _keys)]
+            if _interesting:
+                _detail = (_detail + " | " + " / ".join(_interesting[-4:])).strip()
         except Exception:
             pass
+        import re as _re
+        _detail = _re.sub(r"ya29\.[A-Za-z0-9_\-\.]+", "<redacted>", _detail)
+        _detail = _re.sub(r"1//[A-Za-z0-9_\-]+", "<redacted>", _detail)
         print(_UNAVAILABLE_MARKER + " DriveFS did not mount within " + str(_TIMEOUT_S) + "s (rc=" + str(_process.returncode) + ") " + _detail)
     except Exception as _exc:
         print(_UNAVAILABLE_MARKER + " " + repr(_exc))

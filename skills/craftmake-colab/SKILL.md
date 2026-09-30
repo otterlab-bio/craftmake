@@ -194,15 +194,17 @@ craftmake colab drive login --session gpu    # Drive-scoped credential (once)
 craftmake colab drive logout --session gpu   # forget it
 ```
 
-With a Drive credential the bootstrap mounts Drive in the runtime through a local
-metadata shim plus `/opt/google/drive/drive`, which is what makes
-`/content/drive` real without the Colab frontend. **This is experimental**: the
-binary starts but exits `rc=12` on the live service, so `/content/drive` is not
-mounted yet — prefer `sync_out` as the reliable path.
-`CRAFTMAKE_COLAB_DRIVE_MOUNT=auto|drivefs|off` (default `auto`) controls it; the
-default client is rclone's public one and can be overridden. If the runtime has
-no DriveFS or the mount times out, the run continues with a notice recorded in
-the result's `observability_errors` and `sync_out` remains the fallback.
+With a Drive credential the bootstrap can attempt a mount through a local metadata
+shim plus `/opt/google/drive/drive`. **This does not work and is off by default**:
+DriveFS's sync engine requires a token from Google's own client and rejects a
+third-party one (`CANNOT_INIT_CELLOFS: PERMISSION_DENIED`, exit `rc=12`), and the
+Colab frontend is the only party that can mint a suitable token. Use `sync_out`
+for persistence, or the Drive REST API v3, which does accept the Drive-scoped
+credential.
+`CRAFTMAKE_COLAB_DRIVE_MOUNT=off|auto|drivefs` (default `off`) controls it; the
+default client is rclone's public one and can be overridden. If the runtime has no
+DriveFS or the mount fails, the run continues with a notice recorded in the
+result's `observability_errors` and `sync_out` remains the fallback.
 
 ### 4.6 Limitations verified against the live service
 
