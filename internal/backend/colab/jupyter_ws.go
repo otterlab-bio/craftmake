@@ -143,6 +143,10 @@ func (e *JupyterWebSocketExecutor) executeCells(ctx context.Context, runtime Run
 		if err != nil {
 			return "", &RemoteError{Kind: ErrorKernelDisconnected, Operation: "resolve kernel", Err: err}
 		}
+		// A freshly assigned runtime may hand out a kernel that is still
+		// starting; connecting to its channels then hangs until the read
+		// deadline. Wait for the kernel to report idle first (best effort).
+		e.waitForKernelReady(ctx, runtime.ProxyURL, runtime.ProxyToken, kernelID)
 		targetWS = formatChannelsWSURL(runtime.ProxyURL, kernelID, session)
 	}
 
@@ -326,19 +330,39 @@ func (e *JupyterWebSocketExecutor) sendExecuteRequest(conn *minimalWSConn, sessi
 	return msgID, nil
 }
 
-// drainUntilReply reads iopub/shell messages until the execute_reply for the
-// given cell. It accumulates stream/display_data/error output and terminates on
-// execute_reply. Inbound signatures are verified when HMACKey is configured.
+// ioDrainWindow is how long the reader keeps draining iopub messages after the
+// execute_reply for a cell. Shell (execute_reply) and iopub (stream/error/idle)
+// are independent channels, so the reply can arrive before the output.
+const ioDrainWindow = 3 * time.Second
+
+// drainUntilReply reads iopub/shell messages until the execution of the cell is
+// finished. A real kernel may deliver execute_reply before the iopub output, so
+// the reader keeps draining until the kernel reports `status: idle` for the
+// request, bounded by ioDrainWindow after the reply. It accumulates
+// stream/display_data/error output. Inbound signatures are verified when
+// HMACKey is configured.
 func (e *JupyterWebSocketExecutor) drainUntilReply(ctx context.Context, conn *minimalWSConn, session, msgID string) (string, error) {
 	var output strings.Builder
+	replied := false
+	var drainDeadline time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return output.String(), ctx.Err()
 		default:
 		}
+		if replied && !drainDeadline.IsZero() && !time.Now().Before(drainDeadline) {
+			return output.String(), nil
+		}
+		if replied {
+			_ = conn.SetReadDeadline(drainDeadline)
+		}
 		raw, err := conn.ReadText()
 		if err != nil {
+			if replied {
+				// The drain window elapsed after the reply: the cell is done.
+				return output.String(), nil
+			}
 			return output.String(), &RemoteError{Kind: ErrorKernelDisconnected, Operation: "read kernel message", Err: err}
 		}
 		var msg jupyterMsg
@@ -370,10 +394,19 @@ func (e *JupyterWebSocketExecutor) drainUntilReply(ctx context.Context, conn *mi
 			if content, ok := msg.Content.(map[string]any); ok {
 				writeErrorTraceback(&output, content)
 			}
+		case "status":
+			// iopub idle marks the end of all output for this execution.
+			if content, ok := msg.Content.(map[string]any); ok {
+				if state, _ := content["execution_state"].(string); state == "idle" && replied {
+					_ = conn.SetReadDeadline(time.Time{})
+					return output.String(), nil
+				}
+			}
 		case "colab_request":
 			e.handleColabRequest(ctx, conn, session, msg)
 		case "execute_reply":
-			return output.String(), nil
+			replied = true
+			drainDeadline = time.Now().Add(ioDrainWindow)
 		}
 	}
 }
@@ -444,6 +477,68 @@ func writeErrorTraceback(output *strings.Builder, content map[string]any) {
 				output.WriteString(s)
 				output.WriteString("\n")
 			}
+		}
+	}
+}
+
+// kernelReadyTimeout bounds how long execution waits for a starting kernel.
+const kernelReadyTimeout = 30 * time.Second
+
+// waitForKernelReady polls the Jupyter REST API until the kernel reports idle.
+// It is best effort: when the endpoint is unavailable it returns immediately so
+// callers are not blocked on a proxy that does not expose kernel state.
+func (e *JupyterWebSocketExecutor) waitForKernelReady(ctx context.Context, proxyURL, proxyToken, kernelID string) {
+	if kernelID == "" {
+		return
+	}
+	client := e.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	deadline := time.Now().Add(kernelReadyTimeout)
+	url := strings.TrimRight(proxyURL, "/") + "/api/kernels/" + url.PathEscape(kernelID)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set(HeaderProxyToken, proxyToken)
+		req.Header.Set(HeaderClientAgent, "vscode")
+		req.Header.Set("Accept", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			return
+		}
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			resp.Body.Close()
+			return
+		}
+		ready := false
+		if resp.StatusCode == http.StatusOK {
+			var kernel struct {
+				ExecutionState string `json:"execution_state"`
+				State          string `json:"state"`
+			}
+			if jsonErr := json.NewDecoder(resp.Body).Decode(&kernel); jsonErr == nil {
+				ready = kernel.ExecutionState == "idle" || kernel.State == "idle"
+			}
+		} else {
+			// Any other status means this proxy does not expose kernel state in
+			// the Jupyter shape; stop polling instead of burning the budget.
+			resp.Body.Close()
+			return
+		}
+		resp.Body.Close()
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
 		}
 	}
 }

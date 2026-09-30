@@ -237,6 +237,23 @@ craftmake resume --backend colab --colab-session gpu --run <run_id>
 
 ---
 
+### 4.5 Limitations verified against the live service
+
+- **`/content/drive` is not a mount with the WebSocket executor.** `drive.mount()`
+  needs the Colab frontend and raises over a bare kernel WebSocket, so writes
+  under `/content/drive/...` land on the ephemeral VM disk while the step still
+  exits 0. Prefer `sync_out`, or call the Drive REST API with the propagated
+  credentials.
+- **Drive consent is per runtime, not per account.** A newly assigned runtime
+  reports the Drive credential as unauthorized again, so `colab drive mount
+  --authorize` cannot pre-authorize a later ephemeral run; consent must be given
+  while the run that needs it is waiting (the run-level prompt is the working
+  path).
+- **`sync_in` before the notebook can be too early** on a fresh runtime; `sync_out`
+  after the notebook is reliable, which is why `sync_in` defaults to off.
+
+---
+
 ## 6. Troubleshooting & Operational Rules
 
 1. **HTTP 412 (TooManyAssignmentsError)**:

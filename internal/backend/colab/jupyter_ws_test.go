@@ -30,6 +30,9 @@ func TestJupyterStreamAccumulation(t *testing.T) {
 		reply := jupyterMsg{Header: jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: "execute_reply", Version: "5.3"}, Metadata: map[string]any{}, Content: map[string]any{"status": "ok"}, Channel: "shell"}
 		rdata, _ := json.Marshal(reply)
 		_ = kernelEnd.sendServerText(rdata)
+		idle := jupyterMsg{Header: jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: "status", Version: "5.3"}, Metadata: map[string]any{}, Content: map[string]any{"execution_state": "idle"}, Channel: "iopub"}
+		idata, _ := json.Marshal(idle)
+		_ = kernelEnd.sendServerText(idata)
 	}()
 	executor := &JupyterWebSocketExecutor{SessionID: "sess"}
 	msgID, err := executor.sendExecuteRequest(client, "sess", "print('x')")
@@ -67,6 +70,42 @@ func TestJupyterSignVerify(t *testing.T) {
 	}
 }
 
+// TestJupyterOutputAfterExecuteReplyIsCaptured pins the fix for a defect found
+// against the real service: shell and iopub are independent channels, so a
+// kernel can deliver execute_reply before the cell's stream/error output and
+// idle status. Returning at the reply silently dropped that output.
+func TestJupyterOutputAfterExecuteReplyIsCaptured(t *testing.T) {
+	clientConn, kernel := net.Pipe()
+	defer clientConn.Close()
+	defer kernel.Close()
+	client := &minimalWSConn{conn: clientConn, reader: bufio.NewReader(clientConn)}
+	kernelEnd := &minimalWSConn{conn: kernel, reader: bufio.NewReader(kernel)}
+	go func() {
+		_, _ = kernelEnd.ReadText()
+		send := func(msgType, channel string, content map[string]any) {
+			msg := jupyterMsg{Header: jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: msgType, Version: "5.3"}, Metadata: map[string]any{}, Content: content, Channel: channel}
+			data, _ := json.Marshal(msg)
+			_ = kernelEnd.sendServerText(data)
+		}
+		// Reply first, output afterwards: the order a real kernel may use.
+		send("execute_reply", "shell", map[string]any{"status": "ok"})
+		send("stream", "iopub", map[string]any{"text": "late-output\n"})
+		send("status", "iopub", map[string]any{"execution_state": "idle"})
+	}()
+	executor := &JupyterWebSocketExecutor{SessionID: "sess"}
+	msgID, err := executor.sendExecuteRequest(client, "sess", "print('x')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := executor.drainUntilReply(context.Background(), client, "sess", msgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "late-output") {
+		t.Fatalf("output delivered after execute_reply was dropped: %q", output)
+	}
+}
+
 // TestJupyterDisplayDataAccumulation verifies rich output (display_data /
 // execute_result) contributes its text/plain representation, which the README
 // promises and the step-log materializer relies on.
@@ -89,6 +128,9 @@ func TestJupyterDisplayDataAccumulation(t *testing.T) {
 		reply := jupyterMsg{Header: jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: "execute_reply", Version: "5.3"}, Metadata: map[string]any{}, Content: map[string]any{"status": "ok"}, Channel: "shell"}
 		rdata, _ := json.Marshal(reply)
 		_ = kernelEnd.sendServerText(rdata)
+		idle := jupyterMsg{Header: jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: "status", Version: "5.3"}, Metadata: map[string]any{}, Content: map[string]any{"execution_state": "idle"}, Channel: "iopub"}
+		idata, _ := json.Marshal(idle)
+		_ = kernelEnd.sendServerText(idata)
 	}()
 	executor := &JupyterWebSocketExecutor{SessionID: "sess"}
 	msgID, err := executor.sendExecuteRequest(client, "sess", "df.head()")

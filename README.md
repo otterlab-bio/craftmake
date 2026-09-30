@@ -346,6 +346,14 @@ The file is written directly to your Google Drive and is immediately accessible 
 
 **Optional Drive file service.** Setting `CRAFTMAKE_COLAB_DRIVE_FILES_URL` to a service exposing the `/drive/read` and `/drive/write` endpoints additionally enables Drive-backed log materialization and `RecoverSubmission`, so logs and results can be recovered from the durable workspace without restarting a runtime.
 
+#### Limitations verified against the live service
+
+These were observed on real Colab runtimes, not in a simulator:
+
+- **`/content/drive` is not a mount with the WebSocket executor.** `google.colab.drive.mount()` needs the Colab *frontend*; over a bare kernel WebSocket it raises (`'NoneType' object has no attribute 'kernel'`), and `os.path.ismount('/content/drive')` stays false. Code that writes under `/content/drive/...` therefore writes to the runtime's local disk, which is destroyed with the VM — the step still exits 0, so this fails silently. Use `colab.sync_out` to move results back to the local machine, or drive the Drive REST API with the propagated credentials; do not rely on `mount_path` in the runtime's filesystem.
+- **Drive consent is per runtime, not per account.** The `dfs_ephemeral` authorization URL carries the runtime endpoint, and a newly assigned runtime reports the credential as unauthorized again, so `colab drive mount --authorize` cannot pre-authorize a later ephemeral run — the consent has to be given while the run that needs it is waiting. With `CRAFTMAKE_COLAB_DRIVE_PREFLIGHT` left at its default the run stops early and prints that URL; the run-level consent prompt (`AuthConsentHandler`) is the path that actually completes.
+- **The first connection to a fresh runtime may be too early.** A workspace upload (`sync_in`) issued before the notebook has driven the kernel can time out waiting for the kernel to answer; `sync_out` after the notebook is reliable. `sync_in` defaults to off for this reason.
+
 The exact workflow phase, backend, resource envelope, and reference identity for an `otter.run/v1` snapshot are resolved before execution. By default, mutable overrides (`--backend`, `--run-id`, `--partition`, `--account`, `--qos`, `--time`, `--scratch-root`) are allowed. Pass `--gate` to `run` or `resume` to enforce the immutable layer: backend, run identity, and SLURM resources are then fixed to the resolved snapshot and cannot be overridden.
 
 ```bash

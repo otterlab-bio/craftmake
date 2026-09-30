@@ -223,6 +223,12 @@ func (c *minimalWSConn) readFrame() (opcode byte, payload []byte, fin bool, err 
 	return opcode, payload, fin, nil
 }
 
+// SetReadDeadline bounds the next reads on the connection; a zero time clears
+// the deadline. It is used to drain iopub messages after an execute_reply.
+func (c *minimalWSConn) SetReadDeadline(deadline time.Time) error {
+	return c.conn.SetReadDeadline(deadline)
+}
+
 // Close sends a standard close frame and closes the underlying connection.
 func (c *minimalWSConn) Close() error {
 	_ = c.writeFrame(wsControlClose, []byte{0x03, 0xe8})

@@ -367,6 +367,9 @@ func (m *mock) sendColabRequest(conn net.Conn) {
 
 func (m *mock) sendExecuteReply(conn net.Conn) {
 	m.sendJupyter(conn, "execute_reply", map[string]any{}, map[string]any{"status": "ok", "execution_count": 1})
+	// Real kernels follow the reply with the iopub idle status, which is the
+	// definitive end of a cell's output.
+	m.sendJupyter(conn, "status", map[string]any{}, map[string]any{"execution_state": "idle"})
 }
 
 func (m *mock) sendJupyter(conn net.Conn, msgType string, metadata, content map[string]any) {
