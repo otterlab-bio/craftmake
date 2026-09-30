@@ -278,6 +278,11 @@ func (m *mock) runCell(conn net.Conn, code string) {
 	rewritten := m.rewriteContentPaths(code)
 	stdout, stderr := m.executeCell(rewritten)
 	m.record(fmt.Sprintf("EXEC cell (%s, %d bytes)", cellKind(code), len(code)))
+	for _, marker := range []string{"CRAFTMAKE_DRIVE_MOUNT_UNAVAILABLE", "CRAFTMAKE_DRIVE_MOUNT_OK", "CRAFTMAKE_SYNC_IN_OK"} {
+		if strings.Contains(stdout, marker) || strings.Contains(stderr, marker) {
+			m.record("MARKER " + marker)
+		}
+	}
 	if stdout != "" {
 		m.sendStream(conn, stdout)
 	}

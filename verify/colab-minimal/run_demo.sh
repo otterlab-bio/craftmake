@@ -188,6 +188,21 @@ jobs:
           echo "produced-by-runtime" > /content/drive/MyDrive/craftmake/outputs/out.txt
 YAML
 
+cat > "$PROJECT/.craftmake/drive_mount_probe.yaml" <<'YAML'
+schema_version: craftmake.action/v1
+name: drive_mount_probe
+backend: colab
+colab:
+  session: demo
+  default_accelerator: cpu
+  drive_root: /content/drive/MyDrive/craftmake
+jobs:
+  probe:
+    steps:
+      - run: |
+          echo "step ran; mount state is reported by the bootstrap cell"
+YAML
+
 printf 'local-input-content\n' > "$PROJECT/input.txt"
 
 # ------------------------------------------------------------------ phase 1
@@ -293,6 +308,23 @@ else
 fi
 SYNC_STDOUT_2="$(step_stdout_of "$(run_id_of "$STATE/action-sync-2.out")")"
 assert_contains "runtime still reads the synced file on the second run" "$SYNC_STDOUT_2" "synced input says: local-input-content"
+
+# ------------------------------------------------------------------ phase 5
+
+echo
+echo "==> phase 5: DriveFS mount is attempted and degrades gracefully"
+# A Drive credential makes the bootstrap try to mount Drive with DriveFS. The
+# emulator has no /opt/google/drive/drive binary, so the generated code must
+# report that and let the run continue instead of failing the task.
+CRAFTMAKE_DRIVE_REFRESH_TOKEN="dummy-drive-refresh-token" "$CRAFTMAKE" action run drive_mount_probe --backend colab \
+  --colab-auth-config "$AUTH_CONFIG" --dir "$PROJECT" --force \
+  < /dev/null > "$STATE/action-drivefs.out" 2>&1
+assert_rc "run with a Drive credential exits 0" "$?" "0"
+assert_contains "bootstrap reports that DriveFS is unavailable" "$STATE/action-drivefs.out" "CRAFTMAKE_DRIVE_MOUNT_UNAVAILABLE"
+assert_contains "the missing mount is reported to the user" "$STATE/action-drivefs.out" "DriveFS binary not present"
+DRIVE_RESULT="$(result_json_of "$(run_id_of "$STATE/action-drivefs.out")")"
+assert_contains "the task still succeeds without a mount" "$DRIVE_RESULT" '"status": "succeeded"'
+assert_contains "the missing mount is recorded on the result" "$DRIVE_RESULT" "observability_errors"
 
 # ------------------------------------------------------------------ summary
 

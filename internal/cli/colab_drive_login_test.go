@@ -188,7 +188,7 @@ func TestDriveAccessTokenManagerGuardsClientSwitch(t *testing.T) {
 	if err := os.WriteFile(credFile, []byte("drive-refresh\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := driveAccessTokenManager(colabpkg.SessionAuth{SessionID: "gpu", DriveCredentialFile: credFile, DriveOAuthClientID: "original-drive-client"})
+	_, _, err := driveAccessTokenManager(colabpkg.SessionAuth{SessionID: "gpu", DriveCredentialFile: credFile, DriveOAuthClientID: "original-drive-client"})
 	if err == nil {
 		t.Fatal("expected a Drive client-switch error")
 	}
@@ -198,11 +198,11 @@ func TestDriveAccessTokenManagerGuardsClientSwitch(t *testing.T) {
 		}
 	}
 
-	manager, err := driveAccessTokenManager(colabpkg.SessionAuth{SessionID: "gpu", DriveCredentialFile: credFile, DriveOAuthClientID: "current-drive-client"})
-	if err != nil || manager == nil {
-		t.Fatalf("matching client should build a manager: %v", err)
+	manager, token, err := driveAccessTokenManager(colabpkg.SessionAuth{SessionID: "gpu", DriveCredentialFile: credFile, DriveOAuthClientID: "current-drive-client"})
+	if err != nil || manager == nil || token != "drive-refresh" {
+		t.Fatalf("matching client should build a manager with its token: %v", err)
 	}
-	if manager, err := driveAccessTokenManager(colabpkg.SessionAuth{SessionID: "gpu"}); err != nil || manager != nil {
+	if manager, token, err := driveAccessTokenManager(colabpkg.SessionAuth{SessionID: "gpu"}); err != nil || manager != nil || token != "" {
 		t.Fatalf("a session without Drive credentials should yield no manager: %v", err)
 	}
 }

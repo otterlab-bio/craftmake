@@ -187,13 +187,28 @@ if not os.path.ismount('/content/drive'):
     sys.exit(2)
 ```
 
-### 4.5 Limitations verified against the live service
+### 4.5 Mounting Drive with DriveFS
 
-- **`/content/drive` is not a mount with the WebSocket executor.** `drive.mount()`
-  needs the Colab frontend and raises over a bare kernel WebSocket, so writes
-  under `/content/drive/...` land on the ephemeral VM disk while the step still
-  exits 0. Prefer `sync_out`, or call the Drive REST API with the propagated
-  credentials.
+```bash
+craftmake colab drive login --session gpu    # Drive-scoped credential (once)
+craftmake colab drive logout --session gpu   # forget it
+```
+
+With a Drive credential the bootstrap mounts Drive in the runtime through a local
+metadata shim plus `/opt/google/drive/drive`, which is what makes
+`/content/drive` real without the Colab frontend. **This is experimental**: the
+binary starts but exits `rc=12` on the live service, so `/content/drive` is not
+mounted yet — prefer `sync_out` as the reliable path.
+`CRAFTMAKE_COLAB_DRIVE_MOUNT=auto|drivefs|off` (default `auto`) controls it; the
+default client is rclone's public one and can be overridden. If the runtime has
+no DriveFS or the mount times out, the run continues with a notice recorded in
+the result's `observability_errors` and `sync_out` remains the fallback.
+
+### 4.6 Limitations verified against the live service
+
+- **`/content/drive` is not a mount unless DriveFS mounting succeeded.** Without
+  it, writes under that path land on the ephemeral VM disk while the step still
+  exits 0; use the DriveFS mount above, `sync_out`, or the Drive REST API.
 - **Drive consent is per runtime, not per account.** A newly assigned runtime
   reports the Drive credential as unauthorized again, so `colab drive mount
   --authorize` cannot pre-authorize a later ephemeral run; consent must be given

@@ -21,3 +21,6 @@ Thumbs.db
 
 # Local test archives
 testresult/
+
+# Local end-to-end verification material (may contain real OAuth credentials)
+/.live-verify/

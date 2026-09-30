@@ -32,14 +32,25 @@ type Notebook struct {
 	NbformatMinor int            `json:"nbformat_minor"`
 }
 
+// NotebookOptions carries optional behaviour for a generated notebook.
+type NotebookOptions struct {
+	// DriveMount, when set, makes the bootstrap cell mount Google Drive with the
+	// runtime's DriveFS binary before the steps run.
+	DriveMount *DriveMountSpec
+}
+
 func BuildNotebook(manifest *protocol.TaskManifest, mapping RemoteTaskMapping) (*Notebook, error) {
+	return BuildNotebookWithOptions(manifest, mapping, NotebookOptions{})
+}
+
+func BuildNotebookWithOptions(manifest *protocol.TaskManifest, mapping RemoteTaskMapping, options NotebookOptions) (*Notebook, error) {
 	if manifest == nil {
 		return nil, fmt.Errorf("task manifest is required")
 	}
 	if mapping.WorkDirectory == "" || mapping.TempDirectory == "" || mapping.RuntimeDirectory == "" || mapping.ResultPath == "" {
 		return nil, fmt.Errorf("complete remote task mapping is required")
 	}
-	cells := []NotebookCell{{CellType: "code", Source: bootstrapSource(mapping), Metadata: map[string]any{}}}
+	cells := []NotebookCell{{CellType: "code", Source: bootstrapSource(mapping, options), Metadata: map[string]any{}}}
 	for _, step := range manifest.Steps {
 		cells = append(cells, NotebookCell{CellType: "code", Source: bashSource(step, mapping), Metadata: map[string]any{}})
 	}
@@ -52,7 +63,11 @@ func (n *Notebook) JSON() ([]byte, error) { return json.MarshalIndent(n, "", "  
 // BuildNotebookRedacted builds a notebook and scrubs known secrets from every
 // code cell source so tokens never land in the auditable .ipynb artifact.
 func BuildNotebookRedacted(manifest *protocol.TaskManifest, mapping RemoteTaskMapping, redactor *Redactor) (*Notebook, error) {
-	notebook, err := BuildNotebook(manifest, mapping)
+	return BuildNotebookRedactedWithOptions(manifest, mapping, redactor, NotebookOptions{})
+}
+
+func BuildNotebookRedactedWithOptions(manifest *protocol.TaskManifest, mapping RemoteTaskMapping, redactor *Redactor, options NotebookOptions) (*Notebook, error) {
+	notebook, err := BuildNotebookWithOptions(manifest, mapping, options)
 	if err != nil {
 		return nil, err
 	}
@@ -65,16 +80,31 @@ func BuildNotebookRedacted(manifest *protocol.TaskManifest, mapping RemoteTaskMa
 	return notebook, nil
 }
 
-func bootstrapSource(mapping RemoteTaskMapping) string {
-	mountBlock := ""
-	if strings.HasPrefix(mapping.WorkDirectory, "/content/drive") || strings.HasPrefix(mapping.ResultPath, "/content/drive") {
-		mountBlock = `if not os.path.ismount('/content/drive'):
+// driveMountSource returns the bootstrap code that makes /content/drive usable,
+// or an empty string when the workspace is not on Drive.
+//
+// With a Drive credential the runtime mounts Drive itself with DriveFS, which is
+// the only mechanism that works over a bare kernel WebSocket. Without one it
+// falls back to the historical best-effort google.colab.drive.mount(), which
+// requires the Colab frontend and therefore only succeeds in a real notebook.
+func driveMountSource(mapping RemoteTaskMapping, options NotebookOptions) string {
+	onDrive := strings.HasPrefix(mapping.WorkDirectory, "/content/drive") || strings.HasPrefix(mapping.ResultPath, "/content/drive")
+	if !onDrive {
+		return ""
+	}
+	if options.DriveMount != nil {
+		return strings.TrimRight(BuildDriveFSMountSource(*options.DriveMount), "\n")
+	}
+	return `if not os.path.ismount('/content/drive'):
     try:
         from google.colab import drive
         drive.mount('/content/drive', force_remount=False)
     except Exception as _e:
         print(f"Notice: auto drive.mount: {_e}")`
-	}
+}
+
+func bootstrapSource(mapping RemoteTaskMapping, options NotebookOptions) string {
+	mountBlock := driveMountSource(mapping, options)
 	lines := []string{
 		"import os",
 		"from pathlib import Path",

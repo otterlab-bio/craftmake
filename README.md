@@ -362,11 +362,49 @@ except Exception as exc:
 
 **Optional Drive file service.** Setting `CRAFTMAKE_COLAB_DRIVE_FILES_URL` to a service exposing the `/drive/read` and `/drive/write` endpoints additionally enables Drive-backed log materialization and `RecoverSubmission`, so logs and results can be recovered from the durable workspace without restarting a runtime.
 
+#### Mounting Drive with DriveFS
+
+`craftmake colab drive login --session gpu` authorizes a **Drive-scoped**
+credential (separate from the Colab login, because the runtime client carries no
+Drive API access). When it is present, the run's bootstrap starts a local
+metadata server and the runtime's own `/opt/google/drive/drive` binary against
+it, then waits for the mount — the mechanism that works without the Colab
+frontend:
+
+```bash
+craftmake colab drive login --session gpu     # browser approval once
+craftmake colab drive logout --session gpu    # forget it
+craftmake action run drive_hello --backend colab --force
+```
+
+- `CRAFTMAKE_COLAB_DRIVE_MOUNT` selects `auto` (default: mount when a credential
+  is present), `drivefs` (always attempt) or `off`.
+- The default Drive client is rclone's public installed-app client; override it
+  with `CRAFTMAKE_COLAB_DRIVE_CLIENT_ID`/`_SECRET`, `--client-id`/`--client-secret`,
+  or `make build DRIVE_CLIENT_ID=... DRIVE_CLIENT_SECRET=...`.
+- The refresh token (not a short-lived access token) is embedded in the
+  bootstrap cell so the metadata shim can refresh it in place; the notebook is
+  never written to disk.
+- **Status: the mount does not yet succeed against the live service.** A real
+  run reaches the DriveFS binary and starts it, but it exits with `rc=12`
+  (`OnCoreTerminated`) after only a benign `global_feature_config` `NOT_FOUND`
+  line, so `/content/drive` stays unmounted. The environment is otherwise ready
+  (binary present, `/dev/fuse` present, root, the binary runs). Treat DriveFS
+  mounting as experimental and use `sync_out` as the reliable path until the
+  launch is matched against a known-working invocation.
+- When the runtime has no DriveFS binary, or the mount does not appear in time
+  (`CRAFTMAKE_COLAB_DRIVE_MOUNT_TIMEOUT_SECONDS`, default 90), the run does
+  **not** fail: it prints a notice, records it in the result's
+  `observability_errors`, and continues, so `sync_out` remains the fallback.
+- Because Google binds a refresh token to its client, switching Drive clients
+  requires `colab drive login` again; the mismatch is reported with that exact
+  command.
+
 #### Limitations verified against the live service
 
 These were observed on real Colab runtimes, not in a simulator:
 
-- **`/content/drive` is not a mount with the WebSocket executor.** `google.colab.drive.mount()` needs the Colab *frontend*; over a bare kernel WebSocket it raises (`'NoneType' object has no attribute 'kernel'`), and `os.path.ismount('/content/drive')` stays false. Code that writes under `/content/drive/...` therefore writes to the runtime's local disk, which is destroyed with the VM — the step still exits 0, so this fails silently. Use `colab.sync_out` to move results back to the local machine, or drive the Drive REST API with the propagated credentials; do not rely on `mount_path` in the runtime's filesystem.
+- **`/content/drive` is not a mount by default.** `google.colab.drive.mount()` needs the Colab *frontend*; over a bare kernel WebSocket it raises (`'NoneType' object has no attribute 'kernel'`), and `os.path.ismount('/content/drive')` stays false. The DriveFS mount above is what makes the path real. Code that writes under `/content/drive/...` therefore writes to the runtime's local disk, which is destroyed with the VM — the step still exits 0, so this fails silently. Use `colab.sync_out` to move results back to the local machine, or drive the Drive REST API with the propagated credentials; do not rely on `mount_path` in the runtime's filesystem.
 - **Drive consent is per runtime, not per account.** The `dfs_ephemeral` authorization URL carries the runtime endpoint, and a newly assigned runtime reports the credential as unauthorized again, so `colab drive mount --authorize` cannot pre-authorize a later ephemeral run — the consent has to be given while the run that needs it is waiting. With `CRAFTMAKE_COLAB_DRIVE_PREFLIGHT` left at its default the run stops early and prints that URL; the run-level consent prompt (`AuthConsentHandler`) is the path that actually completes.
 - **The first connection to a fresh runtime may be too early.** A workspace upload (`sync_in`) issued before the notebook has driven the kernel can time out waiting for the kernel to answer; `sync_out` after the notebook is reliable. `sync_in` defaults to off for this reason.
 

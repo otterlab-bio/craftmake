@@ -197,20 +197,21 @@ func newColabDriveLogoutCommand() *cobra.Command {
 }
 
 // driveAccessTokenManager builds the token manager for the session's Drive
-// credential, or returns nil when no Drive credential is configured.
-func driveAccessTokenManager(auth colab.SessionAuth) (*colab.TokenManager, error) {
+// credential and returns the refresh token backing it. Both are empty when the
+// session has no Drive credential.
+func driveAccessTokenManager(auth colab.SessionAuth) (*colab.TokenManager, string, error) {
 	refreshToken, ok := resolveDriveRefreshToken(auth)
 	if !ok {
-		return nil, nil
+		return nil, "", nil
 	}
 	clientID, clientSecret, err := resolveDriveOAuthCredentials("", "")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if auth.DriveOAuthClientID != "" && auth.DriveOAuthClientID != clientID {
-		return nil, fmt.Errorf("session %q Drive access was authorized with OAuth client %s, but the configured client is %s; refresh tokens cannot be moved between clients, so run `craftmake colab drive login --session %s` again", auth.SessionID, auth.DriveOAuthClientID, clientID, auth.SessionID)
+		return nil, "", fmt.Errorf("session %q Drive access was authorized with OAuth client %s, but the configured client is %s; refresh tokens cannot be moved between clients, so run `craftmake colab drive login --session %s` again", auth.SessionID, auth.DriveOAuthClientID, clientID, auth.SessionID)
 	}
 	manager := &colab.TokenManager{Config: colab.TokenConfig{ClientID: clientID, ClientSecret: clientSecret, TokenURL: os.Getenv("CRAFTMAKE_COLAB_TOKEN_URL")}}
 	manager.SetRefreshToken(refreshToken)
-	return manager, nil
+	return manager, refreshToken, nil
 }

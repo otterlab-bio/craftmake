@@ -66,6 +66,13 @@ type Config struct {
 	// DrivePreflight selects how a missing Drive authorization is handled
 	// before a run starts: notify (default), strict, or off.
 	DrivePreflight string
+	// DriveMount selects how the runtime makes /content/drive usable: auto
+	// (default), drivefs, or off.
+	DriveMount string
+	// DriveCredential backs the DriveFS mount. Nil disables mounting.
+	DriveCredential *DriveMountCredential
+	// DriveMountPath is the runtime mount point (default /content/drive).
+	DriveMountPath string
 	// PathMap maps host path prefixes to remote path prefixes for workspace
 	// sync, mirroring the action file's `colab.path_map`.
 	PathMap map[string]string
@@ -113,6 +120,7 @@ func (b *Backend) BeginRun(ctx context.Context, run backend.RunContext) error {
 		config.DefaultAccelerator = "cpu"
 	}
 	config.DrivePreflight = NormalizeDrivePreflightMode(config.DrivePreflight)
+	config.DriveMount = NormalizeDriveMountMode(config.DriveMount)
 	b.Config = config
 	// Validate Drive authorization up front. Instances are acquired per
 	// submission in RunSubmission and released immediately after each manifest
@@ -362,7 +370,7 @@ func (b *Backend) workspaceExcludes() []string {
 // runtime lifecycle; the caller is responsible for release.
 func (b *Backend) executeOnRuntime(ctx context.Context, runtime Runtime, manifest *protocol.TaskManifest, onStarted func(string, map[string]any) error) backend.TaskOutcome {
 	mapping := RemoteTaskMapping{WorkDirectory: filepath.Join(b.remoteRoot(), "work"), TempDirectory: filepath.Join(b.scratchRoot(), "tmp"), RuntimeDirectory: filepath.Join(b.remoteRoot(), "runtime", manifest.TaskID), ResultPath: filepath.Join(b.remoteRoot(), "runtime", manifest.TaskID, "result.json")}
-	notebook, err := BuildNotebookRedacted(manifest, mapping, b.Redactor)
+	notebook, err := BuildNotebookRedactedWithOptions(manifest, mapping, b.Redactor, b.notebookOptions())
 	if err != nil {
 		return backend.TaskOutcome{Err: RedactError(b.Redactor, err)}
 	}
@@ -382,6 +390,12 @@ func (b *Backend) executeOnRuntime(ctx context.Context, runtime Runtime, manifes
 	taskResult, err := DecodeTaskResult(output)
 	if err != nil {
 		return backend.TaskOutcome{Err: RedactError(b.Redactor, fmt.Errorf("%w; raw kernel output: %q", err, output))}
+	}
+	if notice := driveMountNotice(output); notice != "" {
+		// Surface a missing Drive mount: otherwise a step writing under
+		// /content/drive would keep succeeding against the ephemeral disk.
+		taskResult.ObservabilityErrors = append(taskResult.ObservabilityErrors, notice)
+		fmt.Fprintf(os.Stderr, "notice: %s\n", notice)
 	}
 	if err := b.materializeTaskLogs(ctx, taskResult, manifest, mapping, output); err != nil {
 		taskResult.ObservabilityErrors = append(taskResult.ObservabilityErrors, err.Error())
@@ -467,6 +481,44 @@ func extractStepLog(output, header string) string {
 		return rest[:end]
 	}
 	return strings.TrimSpace(rest)
+}
+
+// notebookOptions decides whether the generated notebook should mount Drive.
+// Mounting is attempted only when a Drive credential is configured and the mode
+// is not off; the generated code degrades gracefully when the runtime has no
+// DriveFS binary.
+func (b *Backend) notebookOptions() NotebookOptions {
+	if b.Config.DriveMount == DriveMountOff || b.Config.DriveCredential == nil {
+		return NotebookOptions{}
+	}
+	credential := *b.Config.DriveCredential
+	if strings.TrimSpace(credential.RefreshToken) == "" {
+		return NotebookOptions{}
+	}
+	mountPath := b.Config.DriveMountPath
+	if mountPath == "" {
+		mountPath = b.Config.MountPath
+	}
+	if mountPath == "" {
+		mountPath = "/content/drive"
+	}
+	return NotebookOptions{DriveMount: &DriveMountSpec{Credential: credential, MountPath: mountPath, TimeoutSecs: DriveMountTimeoutFromEnv()}}
+}
+
+// driveMountNotice extracts the reason the runtime could not mount Drive, if
+// the bootstrap reported one. Without this the condition would be invisible:
+// the mount happens in the bootstrap cell, whose output is not part of the task
+// result unless it is surfaced here.
+func driveMountNotice(output string) string {
+	index := strings.Index(output, driveMountUnavailableMarker)
+	if index < 0 {
+		return ""
+	}
+	line := output[index:]
+	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+		line = line[:end]
+	}
+	return strings.TrimSpace(line)
 }
 
 func (b *Backend) remoteRoot() string {

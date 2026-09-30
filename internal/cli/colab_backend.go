@@ -48,6 +48,10 @@ type colabBackendConfig struct {
 	SyncOut            bool
 	Excludes           []string
 	PathMap            map[string]string
+
+	// DriveCredential backs the DriveFS mount when the session has a Drive
+	// credential configured.
+	DriveCredential *colabpkg.DriveMountCredential
 }
 
 // resolveColabBackendConfig merges the action's `colab:` block with the CLI
@@ -100,6 +104,8 @@ func applyColabOverrides(backendInstance *colabpkg.Backend, config colabBackendC
 	backendInstance.Config.SyncOut = config.SyncOut
 	backendInstance.Config.PathMap = config.PathMap
 	backendInstance.Config.DrivePreflight = colabpkg.NormalizeDrivePreflightMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"))
+	backendInstance.Config.DriveMount = colabpkg.NormalizeDriveMountMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_MOUNT"))
+	backendInstance.Config.DriveCredential = config.DriveCredential
 }
 
 // resolveColabRefreshToken returns the Colab refresh token from the session's
@@ -180,6 +186,25 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 		getAccessToken = func() (string, error) { return manager.AccessToken(context.Background()) }
 		client.GetAccessToken = getAccessToken
 	}
+	// Drive-scoped credential for mounting Drive inside the runtime. Absent
+	// means the runtime cannot mount Drive and the workspace sync is the
+	// persistence path.
+	var driveCredential *colabpkg.DriveMountCredential
+	if _, driveToken, driveErr := driveAccessTokenManager(auth); driveErr != nil {
+		return nil, driveErr
+	} else if driveToken != "" {
+		driveClientID, driveClientSecret, credentialErr := resolveDriveOAuthCredentials("", "")
+		if credentialErr != nil {
+			return nil, credentialErr
+		}
+		driveCredential = &colabpkg.DriveMountCredential{
+			ClientID:     driveClientID,
+			ClientSecret: driveClientSecret,
+			RefreshToken: driveToken,
+			Email:        auth.DriveAccountEmail,
+		}
+	}
+
 	var executor *colabpkg.JupyterWebSocketExecutor
 	executor = &colabpkg.JupyterWebSocketExecutor{
 		SessionID:   config.SessionID,
@@ -254,6 +279,7 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 		dependencies.Materializer = colabpkg.DriveFileMaterializer{Client: driveFiles}
 		dependencies.ResultReader = colabpkg.DriveResultReader{Client: driveFiles}
 	}
+	config.DriveCredential = driveCredential
 	factory := colabpkg.NewFactory(dependencies)
 	instance, err := factory(ctx, backend.FactoryConfig{
 		ProjectDirectory: config.ProjectDirectory,
