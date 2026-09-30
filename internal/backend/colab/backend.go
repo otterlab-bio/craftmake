@@ -62,6 +62,9 @@ type Config struct {
 	// runtime's kernel (see NotebookOptions).
 	SyncIn  bool
 	SyncOut bool
+	// DrivePreflight selects how a missing Drive authorization is handled
+	// before a run starts: notify (default), strict, or off.
+	DrivePreflight string
 	// PathMap maps host path prefixes to remote path prefixes for workspace
 	// sync, mirroring the action file's `colab.path_map`.
 	PathMap map[string]string
@@ -108,12 +111,12 @@ func (b *Backend) BeginRun(ctx context.Context, run backend.RunContext) error {
 	if config.DefaultAccelerator == "" {
 		config.DefaultAccelerator = "cpu"
 	}
+	config.DrivePreflight = NormalizeDrivePreflightMode(config.DrivePreflight)
 	b.Config = config
-	// Validate Drive authorization up front (a credential check, not a runtime
-	// assignment). Instances are acquired per-submission in RunSubmission and
-	// released immediately after each manifest executes, because Google Drive
-	// is the durable shared state between jobs.
-	if config.DriveRoot != "" {
+	// Validate Drive authorization up front. Instances are acquired per
+	// submission in RunSubmission and released immediately after each manifest
+	// executes, because Drive is the durable shared state between jobs.
+	if config.DriveRoot != "" && config.DrivePreflight != DrivePreflightOff {
 		if b.MountPreflight == nil {
 			return fmt.Errorf("drive mount preflight is required when drive root is configured")
 		}
@@ -126,10 +129,20 @@ func (b *Backend) BeginRun(ctx context.Context, run backend.RunContext) error {
 			// credential/control-plane failure must surface as itself instead of
 			// being reported as "Drive is not authorized".
 			var required *DriveAuthorizationRequiredError
-			if errors.As(err, &required) {
-				return &MountNotAuthorizedError{SessionID: config.SessionID, AuthConfigPath: config.AuthConfigPath, MountPath: mountPath, DriveRoot: config.DriveRoot, Err: err}
+			if !errors.As(err, &required) {
+				return fmt.Errorf("Colab drive mount preflight failed: %w", err)
 			}
-			return fmt.Errorf("Colab drive mount preflight failed: %w", err)
+			switch config.DrivePreflight {
+			case DrivePreflightStrict:
+				// Colab's Drive consent is bound to the runtime that requested
+				// it, so a run that needs Drive has to authorize while it is
+				// holding a runtime. Strict mode fails now instead of waiting.
+				return &MountNotAuthorizedError{SessionID: config.SessionID, AuthConfigPath: config.AuthConfigPath, MountPath: mountPath, DriveRoot: config.DriveRoot, Err: err}
+			default:
+				// Advisory: the runtime-side consent prompt completes the
+				// authorization while the run is waiting for it.
+				fmt.Fprintf(os.Stderr, "notice: %v; continuing, the runtime will ask for Drive authorization when it is needed\n", err)
+			}
 		}
 	}
 	// Sync the local project into the durable Drive workspace once at run start.

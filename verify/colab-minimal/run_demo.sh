@@ -212,13 +212,14 @@ assert_contains "second probe succeeds silently" "$STATE/phase1-second.log" "suc
 # ------------------------------------------------------------------ phase 2
 
 echo
-echo "==> phase 2: real Drive preflight + action run using the action file session"
+echo "==> phase 2: Drive preflight modes + action run using the action file session"
 start_mock fresh   # forget the Drive consent: this is the "first time" again
 
-"$CRAFTMAKE" action run hello --backend colab \
+# strict: unattended pipelines fail fast instead of blocking on consent.
+CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=strict "$CRAFTMAKE" action run hello --backend colab \
   --colab-auth-config "$AUTH_CONFIG" --dir "$PROJECT" --force \
   < /dev/null > "$STATE/action-blocked.out" 2>&1
-assert_nonzero "action run without Drive authorization fails" "$?"
+assert_nonzero "strict mode fails the run without Drive authorization" "$?"
 assert_contains "blocked run explains the required authorization" "$STATE/action-blocked.out" "Google Drive authorization is required"
 assert_contains "blocked run prints the authorization URL" "$STATE/action-blocked.out" "/consent"
 assert_contains "blocked run prints the working command" "$STATE/action-blocked.out" "colab drive mount --config $AUTH_CONFIG --session demo --authorize"
@@ -232,6 +233,7 @@ fi
   < /dev/null > "$STATE/drive-mount-3.out" 2>&1
 assert_rc "authorizing after the blocked run succeeds" "$?" "0"
 
+# default (notify): the run proceeds; the runtime-side prompt handles consent.
 "$CRAFTMAKE" action run hello --backend colab \
   --colab-auth-config "$AUTH_CONFIG" --dir "$PROJECT" --force \
   < /dev/null > "$STATE/action-1.out" 2>&1
@@ -243,6 +245,14 @@ if [ -f "$CONTENT/drive/MyDrive/craftmake/hello.txt" ]; then
 else
   bad "action wrote to the emulated Drive workspace"
 fi
+
+# notify is advisory: a missing consent must not stop the run.
+start_mock fresh
+"$CRAFTMAKE" action run hello --backend colab \
+  --colab-auth-config "$AUTH_CONFIG" --dir "$PROJECT" --force \
+  < /dev/null > "$STATE/action-notify.out" 2>&1
+assert_contains "notify mode warns about missing Drive authorization" "$STATE/action-notify.out" "continuing, the runtime will ask for Drive authorization"
+assert_not_contains "notify mode does not stop the run at BeginRun" "$STATE/action-notify.out" "Drive mount is not authorized"
 
 # ------------------------------------------------------------------ phase 3
 

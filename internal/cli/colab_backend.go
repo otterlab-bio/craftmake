@@ -99,6 +99,7 @@ func applyColabOverrides(backendInstance *colabpkg.Backend, config colabBackendC
 	backendInstance.Config.SyncIn = config.SyncIn
 	backendInstance.Config.SyncOut = config.SyncOut
 	backendInstance.Config.PathMap = config.PathMap
+	backendInstance.Config.DrivePreflight = colabpkg.NormalizeDrivePreflightMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"))
 }
 
 // resolveColabRefreshToken returns the Colab refresh token from the session's
@@ -228,12 +229,14 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 			}
 		},
 	}
-	// The Drive mount preflight is a real control-plane probe that fails fast
-	// with an authorization URL when the account has not granted Drive access.
-	// Set CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=off to skip it for sessions that do
-	// not need Drive.
+	// The Drive mount preflight probes the account's Drive consent. Colab binds
+	// that consent to the runtime that requested it, so a run needing Drive must
+	// authorize while it holds a runtime: the default (notify) lets the run
+	// continue to the runtime-side consent prompt, while strict fails fast and
+	// off skips the probe.
+	preflightMode := colabpkg.NormalizeDrivePreflightMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"))
 	var mountPreflight colabpkg.DriveMountPreflight = colabpkg.NoopMountPreflight{}
-	if !strings.EqualFold(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"), "off") {
+	if preflightMode != colabpkg.DrivePreflightOff {
 		mountPreflight = &colabpkg.ServerMountPreflight{Client: client}
 	}
 	dependencies := colabpkg.FactoryDependencies{

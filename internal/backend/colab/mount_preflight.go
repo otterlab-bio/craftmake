@@ -3,10 +3,26 @@ package colab
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
-// probeReleaseTimeout bounds the best-effort release of the preflight's probe
+// Drive authorization preflight modes. Colab binds a Drive credential grant to
+// the runtime that requested it, so a fresh ephemeral runtime reports the
+// credential as unauthorized again; pre-authorizing for a later run is not
+// possible. The default is therefore advisory.
+const (
+	// DrivePreflightNotify probes the grant, warns when it is missing and lets
+	// the run continue so the runtime-side consent prompt can complete it.
+	DrivePreflightNotify = "notify"
+	// DrivePreflightStrict fails the run before any task when Drive is not
+	// authorized, which suits unattended pipelines that must not block.
+	DrivePreflightStrict = "strict"
+	// DrivePreflightOff skips the probe entirely.
+	DrivePreflightOff = "off"
+)
+
+// ProbeReleaseTimeout bounds the best-effort release of the preflight's probe
 // runtime so a stalled control plane cannot hang a run that already failed.
 const probeReleaseTimeout = 15 * time.Second
 
@@ -24,6 +40,19 @@ func (e *DriveAuthorizationRequiredError) Error() string {
 		return fmt.Sprintf("Google Drive authorization is required for session %q", e.SessionID)
 	}
 	return fmt.Sprintf("Google Drive authorization is required for session %q; open %s to grant access", e.SessionID, e.RedirectURI)
+}
+
+// NormalizeDrivePreflightMode maps operator input onto a known mode. Unknown or
+// empty values become the advisory default.
+func NormalizeDrivePreflightMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case DrivePreflightOff, "skip", "disabled", "false", "0":
+		return DrivePreflightOff
+	case DrivePreflightStrict, "fail", "true", "1":
+		return DrivePreflightStrict
+	default:
+		return DrivePreflightNotify
+	}
 }
 
 // ServerMountPreflight is the production DriveMountPreflight. It performs the

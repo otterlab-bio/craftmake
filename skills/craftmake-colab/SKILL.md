@@ -110,10 +110,12 @@ Every later runtime repeats only step 1 — a silent dry-run probe plus a real
 credential propagation — so "authorize once" refers to the user consent, not to
 the per-runtime mount.
 
-**Runs fail fast without authorization.** Before any task is scheduled the
-backend probes the consent and aborts with the URL and the exact command to run.
-Sessions that do not need Drive can skip the probe with
-`CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=off`.
+**The preflight is advisory by default.** The backend probes the consent before
+the first task and, when it is missing, prints a notice and lets the run continue
+to the runtime-side consent prompt — Colab binds the grant to the requesting
+runtime, so a pre-authorization cannot cover a later ephemeral run.
+`CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=strict` aborts instead (unattended pipelines),
+and `=off` skips the probe entirely.
 
 ### 4.2 Action files may declare their Colab configuration
 

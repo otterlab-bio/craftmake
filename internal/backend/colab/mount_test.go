@@ -15,9 +15,16 @@ type fakeMountPreflightResult struct{ err error }
 
 func (f fakeMountPreflightResult) CheckMount(context.Context, DriveMountRequest) error { return f.err }
 
+type countingMountPreflight struct{ calls int }
+
+func (c *countingMountPreflight) CheckMount(context.Context, DriveMountRequest) error {
+	c.calls++
+	return nil
+}
+
 func TestBeginRunMountNotAuthorizedReturnsHint(t *testing.T) {
 	b := &Backend{
-		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu"},
+		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu", DrivePreflight: DrivePreflightStrict},
 		Control:        &fakeControlPlane{},
 		Executor:       fakeNotebookExecutor{},
 		MountPreflight: fakeMountPreflightResult{err: &DriveAuthorizationRequiredError{SessionID: "gpu", RedirectURI: "https://colab.research.google.com/consent"}},
@@ -35,6 +42,60 @@ func TestBeginRunMountNotAuthorizedReturnsHint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "craftmake colab drive mount --session gpu --authorize") {
 		t.Fatalf("error missing the real authorization command: %v", err)
+	}
+}
+
+// TestBeginRunMissingDriveConsentIsAdvisoryByDefault pins the behaviour change
+// forced by a live run: Colab binds Drive consent to the requesting runtime, so
+// pre-authorizing for a later ephemeral run is impossible. Failing fast by
+// default blocked runs that would have completed after the runtime-side consent
+// prompt, so the default is now advisory.
+func TestBeginRunMissingDriveConsentIsAdvisoryByDefault(t *testing.T) {
+	b := &Backend{
+		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu"},
+		Control:        &fakeControlPlane{},
+		Executor:       fakeNotebookExecutor{},
+		MountPreflight: fakeMountPreflightResult{err: &DriveAuthorizationRequiredError{SessionID: "gpu", RedirectURI: "https://colab.research.google.com/consent"}},
+	}
+	if err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1", ProjectDirectory: "/local/project"}); err != nil {
+		t.Fatalf("missing Drive consent must not fail the run in the default mode: %v", err)
+	}
+}
+
+// TestBeginRunDrivePreflightOffSkipsProbe verifies the probe is not consulted.
+func TestBeginRunDrivePreflightOffSkipsProbe(t *testing.T) {
+	probe := &countingMountPreflight{}
+	b := &Backend{
+		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu", DrivePreflight: DrivePreflightOff},
+		Control:        &fakeControlPlane{},
+		Executor:       fakeNotebookExecutor{},
+		MountPreflight: probe,
+	}
+	if err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1", ProjectDirectory: "/local/project"}); err != nil {
+		t.Fatal(err)
+	}
+	if probe.calls != 0 {
+		t.Fatalf("off mode must not acquire a probe runtime, got %d calls", probe.calls)
+	}
+}
+
+// TestNormalizeDrivePreflightMode covers the accepted spellings.
+func TestNormalizeDrivePreflightMode(t *testing.T) {
+	cases := map[string]string{
+		"":         DrivePreflightNotify,
+		"notify":   DrivePreflightNotify,
+		"whatever": DrivePreflightNotify,
+		"strict":   DrivePreflightStrict,
+		"fail":     DrivePreflightStrict,
+		"1":        DrivePreflightStrict,
+		"off":      DrivePreflightOff,
+		"skip":     DrivePreflightOff,
+		"0":        DrivePreflightOff,
+	}
+	for input, want := range cases {
+		if got := NormalizeDrivePreflightMode(input); got != want {
+			t.Fatalf("NormalizeDrivePreflightMode(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 
@@ -75,7 +136,7 @@ func TestBeginRunMountNotAuthorizedSurfacesURLAndConfigPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &Backend{
-		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu", AuthConfigPath: authPath},
+		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu", AuthConfigPath: authPath, DrivePreflight: DrivePreflightStrict},
 		Control:        &fakeControlPlane{},
 		Executor:       fakeNotebookExecutor{},
 		MountPreflight: fakeMountPreflightResult{err: &DriveAuthorizationRequiredError{SessionID: "gpu", RedirectURI: "https://colab.research.google.com/consent?x=1"}},

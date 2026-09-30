@@ -170,7 +170,7 @@ The `colab` backend executes tasks on real Google Cloud Colab CPU and GPU runtim
 - **Jupyter Kernel Protocol**: Connects to the Colab runtime proxy WebSocket channels (`/api/kernels/<kernel_id>/channels`), manages `execute_request`, parses `stream`, `display_data`/`execute_result` and `error` envelopes, and coordinates kernel interruption.
 - **Dynamic Kernel Discovery**: Queries `GET /api/kernels` or initializes sessions via `POST /api/sessions` / `POST /api/kernels` with automatic fallback.
 - **Ephemeral instance lifecycle**: Runtimes are acquired per submission and released immediately after each task finishes, because Google Drive (not the VM) is the durable shared state between jobs. `EndRun` sweeps any residual assignment, so a cancelled or failed run cannot leak a machine.
-- **Drive authorization preflight**: Before the first task starts, the backend probes Colab for the account's Drive consent and fails fast with the authorization URL and the exact command when it is missing, instead of blocking mid-execution. See [Drive authorization](#drive-authorization-is-a-one-time-per-account-consent).
+- **Drive authorization preflight**: Before the first task starts, the backend probes Colab for the Drive consent and reports the authorization URL with the exact command when it is missing. The default is advisory (`notify`) because Colab binds the grant to the requesting runtime; `strict` fails fast instead. See [Drive authorization](#drive-authorization-is-a-one-time-per-account-consent).
 - **412 Quota Recovery**: Detects Google Colab free-tier concurrent assignment limits (HTTP 412 `TooManyAssignmentsError`), scans existing dangling assignments, and cleans them up automatically before retrying.
 - **Local Observability Materialization**: Streams from Jupyter cells are captured and written to local task logs (`step-<index>.stdout`, `step-<index>.stderr`) and `result.json` in the state directory, keyed by the manifest's 1-based step index. A step that records no exit code is reported as failed rather than silently succeeding.
 
@@ -236,16 +236,25 @@ craftmake colab drive mount --session gpu --authorize
 
 Every later runtime repeats only step 1: a silent dry-run probe plus a real credential propagation. So "authorize once" refers to the user consent, not to the per-runtime mount.
 
-**A run without Drive authorization fails fast.** The preflight runs before any task is scheduled:
+**The preflight is advisory by default.** Before the first task the backend probes
+the consent; when it is missing it prints a notice and the run continues to the
+runtime-side consent prompt, because (see the limitations below) Colab binds the
+grant to the runtime that requested it and a pre-authorization cannot cover a
+later ephemeral run. `CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=strict` fails before any
+task is scheduled — useful for unattended pipelines — and `=off` skips the probe
+entirely (it is also the only mode that does not spend a probe runtime):
 
 ```text
+# strict
 backend begin run: Drive mount is not authorized for session "demo": Google Drive
 authorization is required for session "demo"; open https://colab.research.google.com/...
 to grant access; run `craftmake colab drive mount --config <auth.json> --session demo
 --authorize` once to authorize
-```
 
-Sessions that do not need Drive can skip the probe with `CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=off`.
+# notify (default)
+notice: Google Drive authorization is required for session "demo"; continuing, the
+runtime will ask for Drive authorization when it is needed
+```
 
 #### Workspace sync (`colab.sync_in` / `colab.sync_out`)
 
