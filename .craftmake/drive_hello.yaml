@@ -11,6 +11,14 @@ jobs:
           print('=== Google Drive Status ===')
           is_mounted = os.path.ismount('/content/drive')
           print('is_mounted:', is_mounted)
+          # The runtime bootstrap mounts Drive when drive_root is configured;
+          # only fall back to an explicit mount, and never let it abort the step.
+          if not is_mounted:
+              try:
+                  from google.colab import drive
+                  drive.mount('/content/drive', force_remount=False)
+              except Exception as exc:
+                  print('Notice: Drive is not mounted:', exc)
           drive_base = Path('/content/drive/MyDrive')
           if not drive_base.exists():
               drive_base = Path('/content/drive/My Drive')
@@ -20,8 +28,13 @@ jobs:
           hello_file.write_text('helloworld from craftmake colab!')
           print('File created successfully:', hello_file)
           print('File content:', hello_file.read_text().strip())
-          from google.colab import drive
-          print('Flushing writes to Google Drive cloud...')
-          drive.flush_and_unmount()
-          print('Flushed and unmounted successfully!')
+          # The task finalizer always flushes before the instance is released;
+          # flush here too when this step must guarantee durability.
+          try:
+              from google.colab import drive
+              print('Flushing writes to Google Drive cloud...')
+              drive.flush_and_unmount()
+              print('Flushed and unmounted successfully!')
+          except Exception as exc:
+              print('Notice: flush skipped:', exc)
           EOF

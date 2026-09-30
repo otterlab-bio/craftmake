@@ -13,9 +13,12 @@ jobs:
           python3 - << 'EOF'
           import os
           from pathlib import Path
-          from google.colab import drive
           if not os.path.ismount('/content/drive'):
-              drive.mount('/content/drive', force_remount=False)
+              try:
+                  from google.colab import drive
+                  drive.mount('/content/drive', force_remount=False)
+              except Exception as exc:
+                  print('Notice: Drive is not mounted:', exc)
           base = Path('/content/drive/MyDrive/craftmake')
           base.mkdir(parents=True, exist_ok=True)
           (base / 'stage.txt').write_text('preprocess-done')
@@ -30,9 +33,12 @@ jobs:
           python3 - << 'EOF'
           import os
           from pathlib import Path
-          from google.colab import drive
           if not os.path.ismount('/content/drive'):
-              drive.mount('/content/drive', force_remount=False)
+              try:
+                  from google.colab import drive
+                  drive.mount('/content/drive', force_remount=False)
+              except Exception as exc:
+                  print('Notice: Drive is not mounted:', exc)
           base = Path('/content/drive/MyDrive/craftmake')
           stage = (base / 'stage.txt').read_text()
           print('GPU train read stage:', stage)
@@ -51,9 +57,12 @@ jobs:
           python3 - << 'EOF'
           import os
           from pathlib import Path
-          from google.colab import drive
           if not os.path.ismount('/content/drive'):
-              drive.mount('/content/drive', force_remount=False)
+              try:
+                  from google.colab import drive
+                  drive.mount('/content/drive', force_remount=False)
+              except Exception as exc:
+                  print('Notice: Drive is not mounted:', exc)
           base = Path('/content/drive/MyDrive/craftmake')
           stage = (base / 'stage.txt').read_text()
           model = (base / 'model.txt').read_text()

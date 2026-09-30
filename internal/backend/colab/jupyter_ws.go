@@ -358,6 +358,14 @@ func (e *JupyterWebSocketExecutor) drainUntilReply(ctx context.Context, conn *mi
 					writeContentText(&output, data, "text/plain")
 				}
 			}
+		case "display_data", "execute_result":
+			// Rich output (display, matplotlib, pandas) carries its text
+			// representation under content.data["text/plain"].
+			if content, ok := msg.Content.(map[string]any); ok {
+				if data, ok := content["data"].(map[string]any); ok {
+					writeContentText(&output, data, "text/plain")
+				}
+			}
 		case "error":
 			if content, ok := msg.Content.(map[string]any); ok {
 				writeErrorTraceback(&output, content)

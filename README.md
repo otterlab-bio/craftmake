@@ -167,11 +167,12 @@ The `colab` backend executes tasks on real Google Cloud Colab CPU and GPU runtim
 #### Architectural highlights
 
 - **Standard Library RFC 6455 WebSocket**: Uses a minimal, pure Go RFC 6455 client supporting transparent TLS (`wss://`), custom proxy token headers (`X-Colab-Runtime-Proxy-Token`), and client identification (`X-Colab-Client-Agent: vscode`).
-- **Jupyter Kernel Protocol**: Connects to the Colab runtime proxy WebSocket channels (`/api/kernels/<kernel_id>/channels`), manages `execute_request`, parses `stream`, `display_data`, and `error` envelopes, and coordinates graceful kernel interruption.
+- **Jupyter Kernel Protocol**: Connects to the Colab runtime proxy WebSocket channels (`/api/kernels/<kernel_id>/channels`), manages `execute_request`, parses `stream`, `display_data`/`execute_result` and `error` envelopes, and coordinates kernel interruption.
 - **Dynamic Kernel Discovery**: Queries `GET /api/kernels` or initializes sessions via `POST /api/sessions` / `POST /api/kernels` with automatic fallback.
-- **Zero Resource Leakage**: Enforces strict lifecycle management—machines are assigned on `BeginRun` and automatically released with verified unassign choreography on `EndRun`.
+- **Ephemeral instance lifecycle**: Runtimes are acquired per submission and released immediately after each task finishes, because Google Drive (not the VM) is the durable shared state between jobs. `EndRun` sweeps any residual assignment, so a cancelled or failed run cannot leak a machine.
+- **Drive authorization preflight**: Before the first task starts, the backend probes Colab for the account's Drive consent and fails fast with the authorization URL and the exact command when it is missing, instead of blocking mid-execution. See [Drive authorization](#drive-authorization-is-a-one-time-per-account-consent).
 - **412 Quota Recovery**: Detects Google Colab free-tier concurrent assignment limits (HTTP 412 `TooManyAssignmentsError`), scans existing dangling assignments, and cleans them up automatically before retrying.
-- **Local Observability Materialization**: Real-time streams from Jupyter cells are captured and written to local task log files (`step-0.stdout`, `step-0.stderr`) and `result.json` in the state directory.
+- **Local Observability Materialization**: Streams from Jupyter cells are captured and written to local task logs (`step-<index>.stdout`, `step-<index>.stderr`) and `result.json` in the state directory, keyed by the manifest's 1-based step index. A step that records no exit code is reported as failed rather than silently succeeding.
 
 ---
 
@@ -183,11 +184,13 @@ Colab sessions store credentials and Drive mount preferences in `~/.config/craft
 
 ```bash
 # Login via browser OAuth loopback flow
+export CRAFTMAKE_COLAB_CLIENT_ID="..."
+export CRAFTMAKE_COLAB_CLIENT_SECRET="..."
 craftmake colab auth login --session gpu
 ```
 
-- Binds an ephemeral local port on `127.0.0.1`.
-- Uses a runtime-configured Google OAuth client with the `https://www.googleapis.com/auth/colaboratory` scope; set `CRAFTMAKE_COLAB_CLIENT_ID` and `CRAFTMAKE_COLAB_CLIENT_SECRET` or pass the CLI flags.
+- Binds an ephemeral local port on `127.0.0.1` and uses PKCE.
+- Uses a runtime-configured Google OAuth client with the `https://www.googleapis.com/auth/colaboratory` scope; craftmake deliberately does not embed an OAuth client, so `CRAFTMAKE_COLAB_CLIENT_ID`/`CRAFTMAKE_COLAB_CLIENT_SECRET` (or `--client-id`/`--client-secret`) are required.
 - Automatically stores the refresh token in `~/.config/craftmake/credentials/<session>.json` (`0600`).
 - **Login once, run indefinitely**: Subsequent runs transparently refresh access tokens in under 0.5s without browser prompts.
 
@@ -205,31 +208,88 @@ craftmake colab doctor --session gpu
 
 ### Google Drive integration
 
-Craftmake supports mounting your personal Google Drive as a durable remote workspace (`/content/drive/MyDrive/<root>`).
+Craftmake uses your personal Google Drive as the durable remote workspace (`/content/drive/MyDrive/<root>`). The runtime VM is disposable; Drive is what survives between jobs.
 
-#### 1. One-time Drive Authorization
+#### Drive authorization is a one-time, per-account consent
 
-Google Colab requires explicit user consent to access Google Drive files. Authorize once per account:
+Google Colab requires explicit user consent before a runtime may access Drive files. Consent is granted **once per Google account** (until revoked) and is remembered server-side by Google — craftmake stores only your refresh token, never the consent itself:
 
 ```bash
-# Trigger interactive Drive mount authorization
+# Ask for Drive authorization for this session
 craftmake colab drive mount --session gpu --authorize
 ```
 
-1. The CLI displays Google's official Drive authorization URL and opens your default browser.
-2. Sign in with your Google account and click **Allow**.
-3. Return to the terminal and press **Enter** (or wait for auto-detection).
-4. Drive authorization is confirmed and bound.
+1. craftmake acquires a short-lived probe runtime and asks Colab to propagate Drive credentials (`dfs_ephemeral`) as a *dry run*.
+2. If the account has already authorized Drive, the command reports `Google Drive is already authorized` and exits — no browser, no prompt.
+3. Otherwise it prints Google's authorization URL, opens your browser, and waits until it detects the completed grant (polling every 3s, or press **Enter** to re-check immediately).
 
-#### 2. Automatic Mount & Cloud Persistence in Workflows
+Every later runtime repeats only step 1: a silent dry-run probe plus a real credential propagation. So "authorize once" refers to the user consent, not to the per-runtime mount.
 
-In your action workflow, files under `/content/drive` are automatically mounted and flushed:
+**A run without Drive authorization fails fast.** The preflight runs before any task is scheduled:
+
+```text
+backend begin run: Drive mount is not authorized for session "demo": Google Drive
+authorization is required for session "demo"; open https://colab.research.google.com/...
+to grant access; run `craftmake colab drive mount --config <auth.json> --session demo
+--authorize` once to authorize
+```
+
+Sessions that do not need Drive can skip the probe with `CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=off`.
+
+#### Workspace sync (`colab.sync_in` / `colab.sync_out`)
+
+Both directions are **opt-in** and travel through the Jupyter kernel, so they need no Drive API client and no extra service:
+
+```yaml
+schema_version: craftmake.action/v1
+name: sync_demo
+backend: colab
+colab:
+  session: gpu
+  drive_root: /content/drive/MyDrive/craftmake
+  sync_in: true
+  sync_out: true
+  excludes:
+    - data
+```
+
+- `sync_in` archives the local project (tar.gz) and extracts it into `/content/drive/MyDrive/craftmake/work` once per run.
+- `sync_out` archives the remote workspace root and merges it into `<project>/.craftmake/colab-workspace/`.
+- The local mirror is always excluded from the upload, so repeated runs never nest `work/work/...`.
+- Symlinks are never uploaded, archive paths that escape the workspace are rejected, and craftmake's own remote `runtime/` directory is excluded from the download.
+- Since the payload travels as a kernel message, both directions are bounded by `CRAFTMAKE_COLAB_SYNC_MAX_BYTES` (default 32 MiB). Keep large datasets on Drive instead.
+- `colab.path_map` maps host prefixes to remote prefixes in both directions (e.g. ship a local dataset directory to a specific Drive folder).
+
+#### Honoring the action file's `colab:` block
+
+`craftmake action run` reads the action's `colab:` block; command-line flags win over it, which in turn wins over the session/auth defaults:
+
+| Field | Meaning |
+|---|---|
+| `session` | Named session (equivalent to `--colab-session`) |
+| `auth_config` | Auth config path (equivalent to `--colab-auth-config`) |
+| `drive_root` / `remote_root` / `scratch_root` | Remote directories used for the durable workspace, the workspace root, and scratch space |
+| `default_accelerator` | Accelerator for jobs that do not set one (`cpu`, `gpu`, `tpu`) |
+| `sync_in` / `sync_out` | Enable the workspace sync described above |
+| `excludes` | Paths skipped by the sync (relative to the project and to the remote root) |
+| `path_map` | Host prefix → remote prefix mapping used by the sync |
+
+With `colab.session` declared, `--colab-session` is optional:
+
+```bash
+craftmake action run hello --backend colab --force
+```
+
+#### Drive persistence example
 
 ```yaml
 # .craftmake/drive_hello.yaml
 schema_version: craftmake.action/v1
 name: drive_hello
 backend: colab
+colab:
+  session: gpu
+  drive_root: /content/drive/MyDrive/craftmake
 jobs:
   drive_test:
     steps:
@@ -237,9 +297,16 @@ jobs:
           python3 - << 'EOF'
           import os
           from pathlib import Path
-          from google.colab import drive
 
-          # Google Drive is auto-mounted by bootstrap when drive_root is configured
+          # The runtime bootstrap mounts Drive when drive_root is configured;
+          # only fall back to an explicit mount when it is missing.
+          if not os.path.ismount('/content/drive'):
+              try:
+                  from google.colab import drive
+                  drive.mount('/content/drive', force_remount=False)
+              except Exception as exc:
+                  print('Notice: Drive is not mounted:', exc)
+
           drive_dir = Path('/content/drive/MyDrive/craftmake')
           drive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -247,19 +314,26 @@ jobs:
           hello_file.write_text('helloworld from craftmake colab!')
           print('Created cloud file:', hello_file)
 
-          # Flush all writes to Google Drive cloud storage
-          drive.flush_and_unmount()
-          print('Flushed to cloud successfully!')
+          # The task finalizer always flushes FUSE writes before the instance is
+          # released; flush here too when the step must guarantee durability.
+          try:
+              from google.colab import drive
+              drive.flush_and_unmount()
+              print('Flushed to cloud successfully!')
+          except Exception as exc:
+              print('Notice: flush skipped:', exc)
           EOF
 ```
 
 Execute the action:
 
 ```bash
-craftmake action run drive_hello --backend colab --colab-session gpu --force
+craftmake action run drive_hello --backend colab --force
 ```
 
 The file is written directly to your Google Drive and is immediately accessible from the web, mobile app, or subsequent workflow runs.
+
+**Optional Drive file service.** Setting `CRAFTMAKE_COLAB_DRIVE_FILES_URL` to a service exposing the `/drive/read` and `/drive/write` endpoints additionally enables Drive-backed log materialization and `RecoverSubmission`, so logs and results can be recovered from the durable workspace without restarting a runtime.
 
 The exact workflow phase, backend, resource envelope, and reference identity for an `otter.run/v1` snapshot are resolved before execution. By default, mutable overrides (`--backend`, `--run-id`, `--partition`, `--account`, `--qos`, `--time`, `--scratch-root`) are allowed. Pass `--gate` to `run` or `resume` to enforce the immutable layer: backend, run identity, and SLURM resources are then fixed to the resolved snapshot and cannot be overridden.
 

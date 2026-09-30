@@ -67,6 +67,43 @@ func TestJupyterSignVerify(t *testing.T) {
 	}
 }
 
+// TestJupyterDisplayDataAccumulation verifies rich output (display_data /
+// execute_result) contributes its text/plain representation, which the README
+// promises and the step-log materializer relies on.
+func TestJupyterDisplayDataAccumulation(t *testing.T) {
+	clientConn, kernel := net.Pipe()
+	defer clientConn.Close()
+	defer kernel.Close()
+	client := &minimalWSConn{conn: clientConn, reader: bufio.NewReader(clientConn)}
+	kernelEnd := &minimalWSConn{conn: kernel, reader: bufio.NewReader(kernel)}
+	go func() {
+		_, _ = kernelEnd.ReadText()
+		display := jupyterMsg{
+			Header:   jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: "display_data", Version: "5.3"},
+			Metadata: map[string]any{},
+			Content:  map[string]any{"data": map[string]any{"text/plain": "displayed-value\n"}},
+			Channel:  "iopub",
+		}
+		data, _ := json.Marshal(display)
+		_ = kernelEnd.sendServerText(data)
+		reply := jupyterMsg{Header: jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: "execute_reply", Version: "5.3"}, Metadata: map[string]any{}, Content: map[string]any{"status": "ok"}, Channel: "shell"}
+		rdata, _ := json.Marshal(reply)
+		_ = kernelEnd.sendServerText(rdata)
+	}()
+	executor := &JupyterWebSocketExecutor{SessionID: "sess"}
+	msgID, err := executor.sendExecuteRequest(client, "sess", "df.head()")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := executor.drainUntilReply(context.Background(), client, "sess", msgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "displayed-value\n" {
+		t.Fatalf("display_data accumulation = %q, want %q", output, "displayed-value\n")
+	}
+}
+
 // TestJupyterExecutorInterruptIdle verifies Interrupt is a no-op when no
 // connection is active.
 func TestJupyterExecutorInterruptIdle(t *testing.T) {

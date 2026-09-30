@@ -53,12 +53,16 @@ Colab sessions store credentials and Drive mount paths in `~/.config/craftmake/c
 ### 3.1 Initial Login (Once per Session)
 
 ```bash
-# Interactive loopback OAuth login using Google's built-in Colab client
+# Interactive loopback OAuth login using runtime-configured Colab OAuth credentials
+export CRAFTMAKE_COLAB_CLIENT_ID="..."
+export CRAFTMAKE_COLAB_CLIENT_SECRET="..."
 craftmake colab auth login --session gpu
 ```
-- Starts an ephemeral loopback HTTP server on `127.0.0.1`.
+- Starts an ephemeral loopback HTTP server on `127.0.0.1` and uses PKCE.
 - Automatically opens your default browser for authorization.
 - Saves the refresh token to `~/.config/craftmake/credentials/<session>.json` (`0600`).
+- Craftmake does not embed an OAuth client: `CRAFTMAKE_COLAB_CLIENT_ID` and
+  `CRAFTMAKE_COLAB_CLIENT_SECRET` (or `--client-id`/`--client-secret`) are required.
 - **No re-authentication needed**: Subsequent task runs silently refresh access tokens JIT in <0.5s.
 
 ### 3.2 Inspect & Preflight
@@ -75,53 +79,106 @@ craftmake colab doctor --session gpu
 
 ## 4. Google Drive Integration
 
-Craftmake supports using Google Drive as a durable remote workspace (`/content/drive/MyDrive/<root>`).
+Craftmake uses Google Drive as the durable remote workspace
+(`/content/drive/MyDrive/<root>`). The runtime VM is disposable; Drive survives
+between jobs.
 
-### 4.1 One-Time Drive Authorization
+### 4.1 Drive authorization is one-time per account
 
-Google Colab requires explicit user consent before granting a runtime access to Google Drive files:
+Google requires explicit consent before a runtime may access Drive files.
+Consent is granted **once per Google account** and remembered server-side by
+Google; craftmake stores only your refresh token.
 
 ```bash
-# Launch interactive Drive mount authorization
+# Ask for Drive authorization for this session
 craftmake colab drive mount --session gpu --authorize
 ```
-1. The CLI prints the official Google authorization URL and opens the browser.
-2. Sign in with your Google account and click **Allow**.
-3. Return to the terminal and press **Enter**.
-4. Drive authorization is confirmed and permanently bound.
 
-### 4.2 Auto-Mount in Action Workflows
+1. Craftmake acquires a short-lived probe runtime and asks Colab to propagate
+   Drive credentials (`dfs_ephemeral`) as a **dry run**.
+2. Already authorized → it prints `Google Drive is already authorized` and exits
+   without any browser prompt.
+3. Otherwise it prints Google's authorization URL and waits until the grant is
+   detected (polls every 3s; press **Enter** to re-check immediately).
 
-When an action accesses `/content/drive` or has `drive_root` configured, the executor automatically mounts Drive during bootstrap.
+Every later runtime repeats only step 1 — a silent dry-run probe plus a real
+credential propagation — so "authorize once" refers to the user consent, not to
+the per-runtime mount.
 
-Always flush writes to cloud storage before the runtime is released:
+**Runs fail fast without authorization.** Before any task is scheduled the
+backend probes the consent and aborts with the URL and the exact command to run.
+Sessions that do not need Drive can skip the probe with
+`CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=off`.
+
+### 4.2 Action files may declare their Colab configuration
 
 ```yaml
 schema_version: craftmake.action/v1
-name: drive_task
+name: mixed_pipeline
 backend: colab
+colab:
+  session: gpu                    # --colab-session becomes optional
+  auth_config: ~/.config/craftmake/colab-auth.json
+  drive_root: /content/drive/MyDrive/craftmake
+  remote_root: /content/craftmake
+  scratch_root: /content
+  default_accelerator: cpu
+  sync_in: true                   # upload the local project before the run
+  sync_out: true                  # mirror the remote workspace back after it
+  excludes: [data]
+  path_map:
+    /host/data: /content/drive/MyDrive/craftmake/data
 jobs:
-  save_model:
+  preprocess:
+    accelerator: cpu
     steps:
-      - run: |
-          python3 - << 'EOF'
-          import os
-          from pathlib import Path
-          from google.colab import drive
+      - run: echo preprocess
+```
 
-          # 1. Verify Drive mount
-          if not os.path.ismount('/content/drive'):
-              drive.mount('/content/drive', force_remount=False)
+Precedence is **CLI flag > action file > session/auth defaults**.
 
-          # 2. Save your outputs directly to Google Drive
-          output_dir = Path('/content/drive/MyDrive/my_project/checkpoints')
-          output_dir.mkdir(parents=True, exist_ok=True)
-          (output_dir / 'model.pt').write_text('model weights')
+### 4.3 Workspace sync (`sync_in` / `sync_out`)
 
-          # 3. CRITICAL: Flush FUSE cache to Google Drive cloud
-          drive.flush_and_unmount()
-          print('Model successfully flushed to Google Drive!')
-          EOF
+Both directions are opt-in and travel through the Jupyter kernel, so no Drive API
+client or extra service is needed:
+
+- `sync_in` archives the local project (tar.gz) and extracts it into
+  `<drive_root>/work` once per run.
+- `sync_out` archives the remote workspace root and merges it into
+  `<project>/.craftmake/colab-workspace/`.
+- The local mirror is excluded from the upload, so repeated runs never nest
+  `work/work/...`.
+- Symlinks are never uploaded, escaping archive paths are rejected, and
+  craftmake's remote `runtime/` directory is excluded from the download.
+- Payloads travel as kernel messages, so both directions are bounded by
+  `CRAFTMAKE_COLAB_SYNC_MAX_BYTES` (default 32 MiB). Keep large data on Drive.
+
+### 4.4 Writing to Drive from a step
+
+The runtime bootstrap already mounts Drive when `drive_root` is configured, so
+only fall back to an explicit mount, and keep the flush guarded:
+
+```python
+import os
+from pathlib import Path
+
+if not os.path.ismount('/content/drive'):
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive', force_remount=False)
+    except Exception as exc:
+        print('Notice: Drive is not mounted:', exc)
+
+output_dir = Path('/content/drive/MyDrive/my_project/checkpoints')
+output_dir.mkdir(parents=True, exist_ok=True)
+(output_dir / 'model.pt').write_text('model weights')
+
+# The task finalizer always flushes FUSE writes before the instance is released.
+try:
+    from google.colab import drive
+    drive.flush_and_unmount()
+except Exception as exc:
+    print('Notice: flush skipped:', exc)
 ```
 
 ---
@@ -140,19 +197,34 @@ craftmake action plan <name> [--arg KEY=VALUE]
 # Execute action locally
 craftmake action run <name> --backend local [--arg KEY=VALUE]
 
-# Execute action on Google Colab
-craftmake action run <name> --backend colab --colab-session gpu [--arg KEY=VALUE] [--force]
+# Execute action on Google Colab (--colab-session is optional when the action
+# file declares colab.session)
+craftmake action run <name> --backend colab [--colab-session gpu] [--force]
+```
+
+### Session Commands
+
+```bash
+craftmake colab auth login --session gpu
+craftmake colab auth configure --config ~/.config/craftmake/colab-auth.json \
+  --session gpu --drive-root /content/drive/MyDrive/craftmake
+craftmake colab auth show --session gpu
+craftmake colab doctor --session gpu
+craftmake colab drive mount --session gpu --authorize
 ```
 
 ### Run Inspection & Recovery
+
+Run ids contain a random suffix, so look results up per run rather than by
+sorting run directories.
 
 ```bash
 # View controller event logs
 cat .craftmake/state/runs/<run_id>/controller.jsonl
 
-# View task results and step stdout/stderr
+# View task results and step stdout/stderr (step indexes are 1-based)
 cat .craftmake/state/runs/<run_id>/tasks/<task_id>/attempt-001/result.json
-cat .craftmake/state/runs/<run_id>/tasks/<task_id>/attempt-001/step-0.stdout
+cat .craftmake/state/runs/<run_id>/tasks/<task_id>/attempt-001/step-1.stdout
 
 # Resume interrupted run
 craftmake resume --backend colab --colab-session gpu --run <run_id>
@@ -164,12 +236,40 @@ craftmake resume --backend colab --colab-session gpu --run <run_id>
 
 1. **HTTP 412 (TooManyAssignmentsError)**:
    - Google Colab limits accounts to 1 concurrent runtime on free tiers.
-   - Craftmake automatically detects 412 errors, queries existing dangling assignments via `GET /v1/assignments`, and unassigns them automatically before retrying.
-2. **Missing Files on Google Drive**:
-   - Always call `drive.flush_and_unmount()` at the end of scripts writing to `/content/drive`.
-   - Because Craftmake immediately unassigns the virtual machine upon task completion, uncommitted FUSE write buffers will be lost if not explicitly flushed.
-3. **Automated Test Isolation**:
-   - Inside test suites (`go test`), the browser launcher is automatically silenced (`isRunningInTest()`).
-   - Use mock servers for control plane endpoints and set `CRAFTMAKE_NO_BROWSER=1` for headless environments.
-4. **Local Credential Fallback**:
-   - `resolveColabRefreshToken` automatically detects and prioritizes `~/.config/craftmake/credentials/<session>.json`.
+   - Craftmake automatically detects 412 errors, queries existing dangling
+     assignments via `GET /v1/assignments`, and unassigns them automatically
+     before retrying.
+2. **"Drive mount is not authorized"**:
+   - The preflight rejected the run before executing any task; run the exact
+     command printed in the message (`colab drive mount ... --authorize`).
+   - The probe runtime is always released, so a failed preflight leaks nothing.
+   - Set `CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=off` for sessions that never touch Drive.
+3. **Failed steps are never reported as successful**:
+   - Each step writes `step-<index>.exit`; the finalizer fails the task when a
+     step exits non-zero, and a *missing* exit code also fails the step.
+   - Local step logs are materialized at
+     `.craftmake/state/runs/<run_id>/tasks/<task_id>/attempt-001/step-<index>.stdout`.
+4. **Missing files on Google Drive**:
+   - The task finalizer calls `drive.flush_and_unmount()` before the instance is
+     released; steps that must guarantee durability should flush too (guarded).
+   - Craftmake releases the VM immediately after each task, so uncommitted FUSE
+     buffers are lost if they are never flushed.
+5. **Workspace sync limits**:
+   - `sync_in`/`sync_out` travel as kernel messages: raise
+     `CRAFTMAKE_COLAB_SYNC_MAX_BYTES` only for code-sized payloads, and keep
+     large data on Drive.
+   - Downloaded files are mirrored into `.craftmake/colab-workspace/`; that
+     directory is excluded from uploads.
+6. **Automated test isolation**:
+   - Inside test suites (`go test`), the browser launcher is automatically
+     silenced (`isRunningInTest()`).
+   - Use mock servers for the control plane and set `CRAFTMAKE_NO_BROWSER=1` for
+     headless environments.
+7. **Local credential fallback**:
+   - `resolveColabRefreshToken` automatically detects and prioritizes
+     `~/.config/craftmake/credentials/<session>.json`, so tests that build a
+     Colab backend must isolate `HOME`.
+8. **Optional Drive file service**:
+   - Setting `CRAFTMAKE_COLAB_DRIVE_FILES_URL` to a service exposing
+     `/drive/read` and `/drive/write` enables Drive-backed log materialization
+     and result recovery (`RecoverSubmission`) without restarting a runtime.
