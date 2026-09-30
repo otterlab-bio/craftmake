@@ -28,6 +28,20 @@ type SessionAuth struct {
 	// requires a fresh login. Empty for sessions created before this was
 	// recorded (or for credentials supplied out of band).
 	OAuthClientID string `json:"oauth_client_id,omitempty"`
+	// DriveOAuthClientID is the equivalent record for the Drive-scoped
+	// credential used to mount Drive, and DriveAccountEmail is the account it
+	// belongs to.
+	DriveOAuthClientID string `json:"drive_oauth_client_id,omitempty"`
+	DriveAccountEmail  string `json:"drive_account_email,omitempty"`
+}
+
+// DriveOAuthScopes are the scopes needed to mount Drive in a runtime and to use
+// the Drive API. They are deliberately separate from the Colab scopes: the
+// Colab client used for runtime access does not carry Drive API access.
+var DriveOAuthScopes = []string{
+	"profile",
+	"email",
+	"https://www.googleapis.com/auth/drive",
 }
 
 func LoadAuthFile(path string) (AuthFile, error) {

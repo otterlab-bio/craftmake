@@ -17,7 +17,7 @@ func newColabCommand() *cobra.Command {
 	auth := &cobra.Command{Use: "auth", Short: "Manage Colab session authentication"}
 	auth.AddCommand(newColabAuthLoginCommand(), newColabAuthConfigureCommand(), newColabAuthShowCommand())
 	drive := &cobra.Command{Use: "drive", Short: "Manage Google Drive session mounts"}
-	drive.AddCommand(newColabDriveMountCommand())
+	drive.AddCommand(newColabDriveMountCommand(), newColabDriveLoginCommand(), newColabDriveLogoutCommand())
 	parent.AddCommand(auth, drive, newColabDoctorCommand())
 	return parent
 }
