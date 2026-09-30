@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -214,4 +215,17 @@ func driveAccessTokenManager(auth colab.SessionAuth) (*colab.TokenManager, strin
 	manager := &colab.TokenManager{Config: colab.TokenConfig{ClientID: clientID, ClientSecret: clientSecret, TokenURL: os.Getenv("CRAFTMAKE_COLAB_TOKEN_URL")}}
 	manager.SetRefreshToken(refreshToken)
 	return manager, refreshToken, nil
+}
+
+// newColabDriveStore builds the Drive REST store for a session, or returns nil
+// when the session has no Drive credential.
+func newColabDriveStore(auth colab.SessionAuth) (colab.DriveStore, error) {
+	manager, _, err := driveAccessTokenManager(auth)
+	if err != nil {
+		return nil, err
+	}
+	if manager == nil {
+		return nil, fmt.Errorf("colab.drive_transport=rest requires a Drive credential; run `craftmake colab drive login --session %s` first", auth.SessionID)
+	}
+	return colab.NewDriveRESTClient(func() (string, error) { return manager.AccessToken(context.Background()) }, nil), nil
 }

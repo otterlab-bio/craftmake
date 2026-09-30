@@ -188,6 +188,27 @@ jobs:
           echo "produced-by-runtime" > /content/drive/MyDrive/craftmake/outputs/out.txt
 YAML
 
+cat > "$PROJECT/.craftmake/drive_rest_probe.yaml" <<'YAML'
+schema_version: craftmake.action/v1
+name: drive_rest_probe
+backend: colab
+colab:
+  session: demo
+  default_accelerator: cpu
+  drive_root: /content/craftmake
+  sync_in: true
+  sync_out: true
+  drive_transport: rest
+  drive_folder: craftmake-e2e
+jobs:
+  persist:
+    steps:
+      - run: |
+          echo "runtime read: $(cat /content/craftmake/work/input.txt)"
+          mkdir -p /content/craftmake/outputs
+          echo "rest-transport-output" > /content/craftmake/outputs/out.txt
+YAML
+
 cat > "$PROJECT/.craftmake/drive_mount_probe.yaml" <<'YAML'
 schema_version: craftmake.action/v1
 name: drive_mount_probe
@@ -325,6 +346,57 @@ assert_contains "the missing mount is reported to the user" "$STATE/action-drive
 DRIVE_RESULT="$(result_json_of "$(run_id_of "$STATE/action-drivefs.out")")"
 assert_contains "the task still succeeds without a mount" "$DRIVE_RESULT" '"status": "succeeded"'
 assert_contains "the missing mount is recorded on the result" "$DRIVE_RESULT" "observability_errors"
+
+# ------------------------------------------------------------------ phase 6
+
+echo
+echo "==> phase 6: Drive REST transport persists the workspace to Drive"
+# A local Drive v3 emulator stands in for the real API, so the transport is
+# verified deterministically and without the shared client's quota.
+python3 "$(dirname "$0")/fakedrive.py" --port 0 > "$STATE/fakedrive.port" 2>"$STATE/fakedrive.err" &
+FAKE_DRIVE_PID=$!
+for _ in $(seq 1 50); do
+  [ -s "$STATE/fakedrive.port" ] && break
+  sleep 0.1
+done
+FAKE_DRIVE_PORT="$(cat "$STATE/fakedrive.port" 2>/dev/null)"
+if [ -n "$FAKE_DRIVE_PORT" ]; then
+  ok "local Drive emulator started on port $FAKE_DRIVE_PORT"
+else
+  bad "local Drive emulator did not start: $(cat "$STATE/fakedrive.err" 2>/dev/null)"
+fi
+
+CRAFTMAKE_COLAB_DRIVE_TRANSPORT=rest \
+CRAFTMAKE_DRIVE_REFRESH_TOKEN="dummy-drive-refresh-token" \
+CRAFTMAKE_DRIVE_API_URL="http://127.0.0.1:$FAKE_DRIVE_PORT/drive/v3" \
+CRAFTMAKE_DRIVE_UPLOAD_URL="http://127.0.0.1:$FAKE_DRIVE_PORT/upload/drive/v3" \
+  "$CRAFTMAKE" action run drive_rest_probe --backend colab \
+  --colab-auth-config "$AUTH_CONFIG" --dir "$PROJECT" --force \
+  < /dev/null > "$STATE/action-drive-rest.out" 2>&1
+assert_rc "run with the Drive REST transport exits 0" "$?" "0"
+assert_contains "the task succeeded" "$(result_json_of "$(run_id_of "$STATE/action-drive-rest.out")")" '"status": "succeeded"'
+
+python3 - "$FAKE_DRIVE_PORT" > "$STATE/fakedrive-state.json" <<'PYEOF'
+import json, sys, urllib.request
+with urllib.request.urlopen("http://127.0.0.1:%s/__state" % sys.argv[1], timeout=10) as response:
+    json.dump(json.load(response), sys.stdout)
+PYEOF
+if grep -q "craftmake-e2e/outputs/out.txt" "$STATE/fakedrive-state.json"; then
+  ok "the runtime's output reached Drive at craftmake-e2e/outputs/out.txt"
+else
+  bad "the runtime's output did not reach Drive: $(head -c 300 "$STATE/fakedrive-state.json")"
+fi
+if grep -q "rest-transport-output" "$STATE/fakedrive-state.json"; then
+  ok "the uploaded content matches what the runtime wrote"
+else
+  bad "the uploaded Drive content is wrong"
+fi
+if grep -q "craftmake-e2e/work/input.txt" "$STATE/fakedrive-state.json"; then
+  ok "sync_in uploaded the local project to Drive as well"
+else
+  bad "the local project was not mirrored to Drive"
+fi
+kill "$FAKE_DRIVE_PID" 2>/dev/null
 
 # ------------------------------------------------------------------ summary
 

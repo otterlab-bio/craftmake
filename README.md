@@ -334,6 +334,41 @@ craftmake action run sync_roundtrip --backend colab --force
 # <project>/.craftmake/colab-workspace/outputs/out.txt
 ```
 
+#### Persisting the workspace to Google Drive (`colab.drive_transport: rest`)
+
+The workspace sync can mirror itself into the account's Google Drive through the
+Drive REST API, which is what makes results durable across ephemeral runtimes:
+
+```yaml
+colab:
+  session: gpu
+  drive_root: /content/craftmake
+  sync_in: true
+  sync_out: true
+  drive_transport: rest      # kernel (default) | rest
+  drive_folder: craftmake    # folder under My Drive (derived from drive_root if omitted)
+```
+
+```bash
+craftmake colab drive login --session gpu   # once; a Drive-scoped credential
+craftmake action run sync_roundtrip --backend colab --force
+```
+
+- `rest` needs the Drive-scoped credential from `colab drive login`; without it
+  the run fails with the exact command to run.
+- `sync_out` uploads the runtime's workspace to `<drive_folder>/…`; `sync_in`
+  restores that folder into the runtime before the local project is uploaded, so
+  local files win where they overlap.
+- Uploads replace an existing file of the same name, so repeated runs converge
+  instead of piling up duplicates.
+- **Use your own OAuth client for real workloads.** The bundled default is
+  rclone's public client, whose per-project quota is shared with every other
+  rclone user; it can reject requests with
+  `403 ... reason rateLimitExceeded` (`Quota exceeded ... project_number:202264815644`).
+  Transient rejections are retried with backoff and reported honestly, but your
+  own client removes the limit:
+  `CRAFTMAKE_COLAB_DRIVE_CLIENT_ID` / `CRAFTMAKE_COLAB_DRIVE_CLIENT_SECRET`.
+
 #### Writing to Drive from a step
 
 A step must not assume `/content/drive` exists: writing there without a real

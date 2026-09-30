@@ -48,10 +48,14 @@ type colabBackendConfig struct {
 	SyncOut            bool
 	Excludes           []string
 	PathMap            map[string]string
+	DriveTransport     string
+	DriveFolder        string
 
 	// DriveCredential backs the DriveFS mount when the session has a Drive
 	// credential configured.
 	DriveCredential *colabpkg.DriveMountCredential
+	// DriveStore backs the Drive REST transport.
+	DriveStore colabpkg.DriveStore
 }
 
 // resolveColabBackendConfig merges the action's `colab:` block with the CLI
@@ -75,6 +79,12 @@ func resolveColabBackendConfig(options commonOptions, sessionFlag, authConfigFla
 	config.ScratchRoot = spec.ScratchRoot
 	config.DefaultAccelerator = spec.DefaultAccelerator
 	config.SyncIn = spec.SyncIn
+	if spec.DriveTransport != "" {
+		config.DriveTransport = spec.DriveTransport
+	}
+	if spec.DriveFolder != "" {
+		config.DriveFolder = spec.DriveFolder
+	}
 	config.SyncOut = spec.SyncOut
 	config.Excludes = spec.Excludes
 	config.PathMap = spec.PathMap
@@ -106,6 +116,13 @@ func applyColabOverrides(backendInstance *colabpkg.Backend, config colabBackendC
 	backendInstance.Config.DrivePreflight = colabpkg.NormalizeDrivePreflightMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"))
 	backendInstance.Config.DriveMount = colabpkg.NormalizeDriveMountMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_MOUNT"))
 	backendInstance.Config.DriveCredential = config.DriveCredential
+	transport := config.DriveTransport
+	if envTransport := os.Getenv("CRAFTMAKE_COLAB_DRIVE_TRANSPORT"); envTransport != "" {
+		transport = envTransport
+	}
+	backendInstance.Config.DriveTransport = colabpkg.NormalizeDriveTransport(transport)
+	backendInstance.Config.DriveFolder = config.DriveFolder
+	backendInstance.Config.DriveStore = config.DriveStore
 }
 
 // resolveColabRefreshToken returns the Colab refresh token from the session's
@@ -203,6 +220,15 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 			RefreshToken: driveToken,
 			Email:        auth.DriveAccountEmail,
 		}
+	}
+	// The REST transport needs an access token per request, so it reuses the same
+	// Drive-scoped credential and refreshes it through the token manager.
+	if colabpkg.NormalizeDriveTransport(config.DriveTransport) == colabpkg.DriveTransportREST || colabpkg.NormalizeDriveTransport(os.Getenv("CRAFTMAKE_COLAB_DRIVE_TRANSPORT")) == colabpkg.DriveTransportREST {
+		store, storeErr := newColabDriveStore(auth)
+		if storeErr != nil {
+			return nil, storeErr
+		}
+		config.DriveStore = store
 	}
 
 	var executor *colabpkg.JupyterWebSocketExecutor

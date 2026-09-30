@@ -18,6 +18,26 @@ const (
 	DriveMountOff = "off"
 )
 
+// Drive workspace transports.
+const (
+	// DriveTransportKernel keeps the workspace sync entirely inside the runtime
+	// kernel (the default; needs no Drive access at all).
+	DriveTransportKernel = "kernel"
+	// DriveTransportREST mirrors the workspace into the account's Drive through
+	// the Drive REST API.
+	DriveTransportREST = "rest"
+)
+
+// NormalizeDriveTransport maps operator input onto a known transport.
+func NormalizeDriveTransport(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case DriveTransportREST, "drive", "api":
+		return DriveTransportREST
+	default:
+		return DriveTransportKernel
+	}
+}
+
 // DriveFSBinary is the Drive filesystem binary shipped with Colab runtimes.
 const DriveFSBinary = "/opt/google/drive/drive"
 

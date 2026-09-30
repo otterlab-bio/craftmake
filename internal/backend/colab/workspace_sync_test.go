@@ -241,3 +241,116 @@ func TestUploadWorkspaceGivesUpAfterAttempts(t *testing.T) {
 		t.Fatalf("expected %d attempts, got %d", workspaceUploadAttempts, transport.attempts)
 	}
 }
+
+// fakeDriveStore records what the REST transport uploads and serves what it
+// should restore.
+type fakeDriveStore struct {
+	uploaded map[string]string
+	restore  map[string]string
+}
+
+func newFakeDriveStore() *fakeDriveStore {
+	return &fakeDriveStore{uploaded: map[string]string{}}
+}
+
+func (f *fakeDriveStore) Upload(_ context.Context, folderPath, name string, data []byte) error {
+	key := name
+	if folderPath != "" {
+		key = folderPath + "/" + name
+	}
+	f.uploaded[key] = string(data)
+	return nil
+}
+
+func (f *fakeDriveStore) Walk(_ context.Context, folderPath string, visit func(string, []byte) error) error {
+	prefix := strings.Trim(folderPath, "/")
+	for relative, content := range f.restore {
+		if prefix != "" {
+			if !strings.HasPrefix(relative, prefix+"/") {
+				continue
+			}
+			relative = strings.TrimPrefix(relative, prefix+"/")
+		}
+		if err := visit(relative, []byte(content)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TestSyncOutUploadsMirrorToDrive covers the REST transport: after the kernel
+// download, the local mirror is persisted into Drive.
+func TestSyncOutUploadsMirrorToDrive(t *testing.T) {
+	localRoot := t.TempDir()
+	executor := &fakeSyncExecutor{download: archiveWithMember(t, "outputs/result.txt", "trained\n")}
+	store := newFakeDriveStore()
+	colabBackend := &Backend{
+		Control:  &fakeControlPlane{},
+		Executor: executor,
+		Config: Config{RemoteRoot: "/content/craftmake", LocalRoot: localRoot, SyncOut: true,
+			DriveTransport: DriveTransportREST, DriveFolder: "craftmake", DriveStore: store},
+	}
+	if _, err := colabBackend.RunSubmission(context.Background(), "sub-1", backendpkg.SubmissionRequest{Manifests: []*protocol.TaskManifest{syncableManifest("t1")}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.uploaded["craftmake/outputs/result.txt"]; got != "trained\n" {
+		t.Fatalf("Drive upload missing or wrong: %#v", store.uploaded)
+	}
+	// The kernel download still populates the local mirror.
+	if _, err := os.Stat(filepath.Join(localRoot, ".craftmake", "colab-workspace", "outputs", "result.txt")); err != nil {
+		t.Fatalf("local mirror missing: %v", err)
+	}
+}
+
+// TestSyncInRestoresDriveBeforeLocalProject covers the other direction: the
+// durable Drive workspace is restored into the runtime before the local project.
+func TestSyncInRestoresDriveBeforeLocalProject(t *testing.T) {
+	localRoot := t.TempDir()
+	writeWorkspaceFile(t, filepath.Join(localRoot, "script.sh"), "echo hi\n")
+	executor := &fakeSyncExecutor{}
+	store := newFakeDriveStore()
+	store.restore = map[string]string{"craftmake/outputs/previous.txt": "from-drive\n"}
+	colabBackend := &Backend{
+		Control:  &fakeControlPlane{},
+		Executor: executor,
+		Config: Config{RemoteRoot: "/content/craftmake", LocalRoot: localRoot, SyncIn: true,
+			DriveTransport: DriveTransportREST, DriveFolder: "craftmake", DriveStore: store},
+	}
+	if _, err := colabBackend.RunSubmission(context.Background(), "sub-1", backendpkg.SubmissionRequest{Manifests: []*protocol.TaskManifest{syncableManifest("t1")}}); err != nil {
+		t.Fatal(err)
+	}
+	if executor.uploads != 2 {
+		t.Fatalf("expected a Drive restore plus the project upload, got %d uploads", executor.uploads)
+	}
+	names := archiveMemberNames(t, executor.uploaded[0])
+	if !containsString(names, "content/craftmake/outputs/previous.txt") {
+		t.Fatalf("restored archive is missing the Drive file: %#v", names)
+	}
+	projectNames := archiveMemberNames(t, executor.uploaded[1])
+	if !containsString(projectNames, "content/craftmake/work/script.sh") {
+		t.Fatalf("project archive is missing the local file: %#v", projectNames)
+	}
+	mirror, err := os.ReadFile(filepath.Join(localRoot, ".craftmake", "colab-workspace", "outputs", "previous.txt"))
+	if err != nil || string(mirror) != "from-drive\n" {
+		t.Fatalf("mirror not restored from Drive: %q %v", mirror, err)
+	}
+}
+
+// TestDriveFolderDerivesFromDriveRoot keeps the Drive folder predictable.
+func TestDriveFolderDerivesFromDriveRoot(t *testing.T) {
+	cases := map[string]string{
+		"/content/drive/MyDrive/craftmake":  "craftmake",
+		"/content/drive/My Drive/project/x": "project/x",
+		"/content/craftmake":                "craftmake",
+	}
+	for root, want := range cases {
+		colabBackend := &Backend{Config: Config{RemoteRoot: root}}
+		if got := colabBackend.driveFolder(); got != want {
+			t.Fatalf("driveFolder(%q) = %q, want %q", root, got, want)
+		}
+	}
+	explicit := &Backend{Config: Config{RemoteRoot: "/content/craftmake", DriveFolder: "custom/dir"}}
+	if got := explicit.driveFolder(); got != "custom/dir" {
+		t.Fatalf("explicit drive folder ignored: %q", got)
+	}
+}

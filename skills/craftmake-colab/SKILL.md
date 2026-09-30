@@ -187,7 +187,24 @@ if not os.path.ismount('/content/drive'):
     sys.exit(2)
 ```
 
-### 4.5 Mounting Drive with DriveFS
+### 4.5 Persisting the workspace to Google Drive
+
+```yaml
+colab:
+  sync_in: true
+  sync_out: true
+  drive_transport: rest     # kernel (default) | rest
+  drive_folder: craftmake   # folder under My Drive
+```
+
+`rest` mirrors the workspace into Drive through the Drive REST API (requires
+`craftmake colab drive login --session <id>`): `sync_out` uploads the runtime's
+workspace, `sync_in` restores it into the runtime first, and re-uploads replace
+existing files. The bundled default client is rclone's public one, whose quota is
+shared globally — for real workloads set your own
+`CRAFTMAKE_COLAB_DRIVE_CLIENT_ID`/`_SECRET`.
+
+### 4.6 Mounting Drive with DriveFS
 
 ```bash
 craftmake colab drive login --session gpu    # Drive-scoped credential (once)
@@ -206,7 +223,7 @@ default client is rclone's public one and can be overridden. If the runtime has 
 DriveFS or the mount fails, the run continues with a notice recorded in the
 result's `observability_errors` and `sync_out` remains the fallback.
 
-### 4.6 Limitations verified against the live service
+### 4.7 Limitations verified against the live service
 
 - **`/content/drive` is not a mount unless DriveFS mounting succeeded.** Without
   it, writes under that path land on the ephemeral VM disk while the step still

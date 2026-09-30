@@ -41,6 +41,8 @@ type ColabSpec struct {
 	DefaultAccelerator string            `yaml:"default_accelerator,omitempty"`
 	SyncIn             bool              `yaml:"sync_in,omitempty"`
 	SyncOut            bool              `yaml:"sync_out,omitempty"`
+	DriveTransport     string            `yaml:"drive_transport,omitempty"`
+	DriveFolder        string            `yaml:"drive_folder,omitempty"`
 	Excludes           []string          `yaml:"excludes,omitempty"`
 	PathMap            map[string]string `yaml:"path_map,omitempty"`
 }
@@ -297,7 +299,7 @@ func renderColab(spec ColabSpec, context map[string]any) (ColabSpec, error) {
 }
 
 func colabContext(spec ColabSpec) map[string]any {
-	return map[string]any{"session": spec.Session, "auth_config": spec.AuthConfig, "drive_root": spec.DriveRoot, "remote_root": spec.RemoteRoot, "scratch_root": spec.ScratchRoot, "sync_in": spec.SyncIn, "sync_out": spec.SyncOut, "excludes": spec.Excludes, "path_map": spec.PathMap}
+	return map[string]any{"session": spec.Session, "auth_config": spec.AuthConfig, "drive_root": spec.DriveRoot, "remote_root": spec.RemoteRoot, "scratch_root": spec.ScratchRoot, "sync_in": spec.SyncIn, "sync_out": spec.SyncOut, "excludes": spec.Excludes, "path_map": spec.PathMap, "drive_transport": spec.DriveTransport, "drive_folder": spec.DriveFolder}
 }
 
 func parameterValues(args, environment map[string]string) map[string]any {

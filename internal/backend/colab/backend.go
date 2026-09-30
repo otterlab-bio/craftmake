@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -73,6 +74,15 @@ type Config struct {
 	DriveCredential *DriveMountCredential
 	// DriveMountPath is the runtime mount point (default /content/drive).
 	DriveMountPath string
+	// DriveTransport selects how the workspace sync reaches Google Drive:
+	// kernel (default, through the Jupyter kernel only) or rest (the Drive REST
+	// API, durable in the account's Drive).
+	DriveTransport string
+	// DriveFolder is the Drive folder the workspace mirrors into, relative to
+	// My Drive.
+	DriveFolder string
+	// DriveStore backs DriveTransport=rest. Nil disables it.
+	DriveStore DriveStore
 	// PathMap maps host path prefixes to remote path prefixes for workspace
 	// sync, mirroring the action file's `colab.path_map`.
 	PathMap map[string]string
@@ -121,6 +131,7 @@ func (b *Backend) BeginRun(ctx context.Context, run backend.RunContext) error {
 	}
 	config.DrivePreflight = NormalizeDrivePreflightMode(config.DrivePreflight)
 	config.DriveMount = NormalizeDriveMountMode(config.DriveMount)
+	config.DriveTransport = NormalizeDriveTransport(config.DriveTransport)
 	b.Config = config
 	// Validate Drive authorization up front. Instances are acquired per
 	// submission in RunSubmission and released immediately after each manifest
@@ -281,6 +292,14 @@ func (b *Backend) syncWorkspaceIn(ctx context.Context, runtime Runtime) error {
 	if b.syncInDone {
 		return nil
 	}
+	// With the REST transport the durable workspace lives in Google Drive: pull
+	// it into the local mirror and restore it into the runtime before the local
+	// project is uploaded, so local files win for the paths they cover.
+	if b.Config.DriveTransport == DriveTransportREST && b.Config.DriveStore != nil {
+		if err := b.restoreDriveWorkspace(ctx, transport, runtime); err != nil {
+			return err
+		}
+	}
 	mapper := PathMapper{HostRoot: b.Config.LocalRoot, RemoteRoot: filepath.Join(b.remoteRoot(), "work"), PathMap: b.Config.PathMap}
 	archive, err := BuildWorkspaceArchive(b.Config.LocalRoot, mapper, b.workspaceExcludes())
 	if err != nil {
@@ -291,6 +310,95 @@ func (b *Backend) syncWorkspaceIn(ctx context.Context, runtime Runtime) error {
 	}
 	b.syncInDone = true
 	return nil
+}
+
+// restoreDriveWorkspace mirrors the Drive folder into the local mirror and
+// uploads it into the runtime at the remote workspace root.
+func (b *Backend) restoreDriveWorkspace(ctx context.Context, transport WorkspaceTransport, runtime Runtime) error {
+	mirrorRoot := b.syncOutRoot()
+	if err := os.MkdirAll(mirrorRoot, 0o755); err != nil {
+		return err
+	}
+	restored := 0
+	if err := b.Config.DriveStore.Walk(ctx, b.driveFolder(), func(relativePath string, data []byte) error {
+		target := filepath.Join(mirrorRoot, filepath.FromSlash(relativePath))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			return err
+		}
+		restored++
+		return nil
+	}); err != nil {
+		return fmt.Errorf("restore workspace from Drive: %w", err)
+	}
+	if restored == 0 {
+		return nil
+	}
+	archive, err := BuildWorkspaceArchive(mirrorRoot, PathMapper{HostRoot: mirrorRoot, RemoteRoot: b.remoteRoot()}, nil)
+	if err != nil {
+		return err
+	}
+	return uploadWorkspaceWithRetry(ctx, transport, runtime, archive)
+}
+
+// persistDriveWorkspace uploads the local mirror into the Drive folder.
+func (b *Backend) persistDriveWorkspace(ctx context.Context) (int, error) {
+	mirrorRoot := b.syncOutRoot()
+	if _, err := os.Stat(mirrorRoot); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	uploaded := 0
+	err := filepath.WalkDir(mirrorRoot, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		relative, err := filepath.Rel(mirrorRoot, current)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(current)
+		if err != nil {
+			return err
+		}
+		folder := b.driveFolder()
+		if directory := path.Dir(filepath.ToSlash(relative)); directory != "." {
+			if folder == "" {
+				folder = directory
+			} else {
+				folder = path.Join(folder, directory)
+			}
+		}
+		if err := b.Config.DriveStore.Upload(ctx, folder, filepath.Base(relative), data); err != nil {
+			return fmt.Errorf("upload %s to Drive: %w", relative, err)
+		}
+		uploaded++
+		return nil
+	})
+	return uploaded, err
+}
+
+// driveFolder is the Drive folder the workspace mirrors into.
+func (b *Backend) driveFolder() string {
+	if folder := strings.Trim(strings.TrimSpace(b.Config.DriveFolder), "/"); folder != "" {
+		return folder
+	}
+	// Derive from a Drive-shaped remote root, e.g.
+	// /content/drive/MyDrive/craftmake -> craftmake.
+	root := b.remoteRoot()
+	for _, prefix := range []string{"/content/drive/My Drive/", "/content/drive/MyDrive/"} {
+		if strings.HasPrefix(root, prefix) {
+			return strings.Trim(strings.TrimPrefix(root, prefix), "/")
+		}
+	}
+	return "craftmake"
 }
 
 // uploadWorkspaceWithRetry retries the upload while the failure looks like a
@@ -337,7 +445,15 @@ func (b *Backend) syncWorkspaceOut(ctx context.Context, runtime Runtime) error {
 	if err := os.MkdirAll(mirrorRoot, 0o755); err != nil {
 		return err
 	}
-	return ExtractWorkspaceArchive(archive, mirrorRoot, b.remoteRoot(), b.Config.PathMap, b.workspaceSyncOutExcludes())
+	if err := ExtractWorkspaceArchive(archive, mirrorRoot, b.remoteRoot(), b.Config.PathMap, b.workspaceSyncOutExcludes()); err != nil {
+		return err
+	}
+	if b.Config.DriveTransport == DriveTransportREST && b.Config.DriveStore != nil {
+		if _, err := b.persistDriveWorkspace(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // syncOutRoot is the local mirror of the remote workspace. It lives inside the

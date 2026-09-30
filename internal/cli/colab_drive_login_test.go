@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	action "github.com/otterlab-bio/craftmake/internal/adapters/action"
 	colabpkg "github.com/otterlab-bio/craftmake/internal/backend/colab"
 )
 
@@ -204,5 +205,47 @@ func TestDriveAccessTokenManagerGuardsClientSwitch(t *testing.T) {
 	}
 	if manager, token, err := driveAccessTokenManager(colabpkg.SessionAuth{SessionID: "gpu"}); err != nil || manager != nil || token != "" {
 		t.Fatalf("a session without Drive credentials should yield no manager: %v", err)
+	}
+}
+
+// TestColabDriveTransportRequiresCredential pins the actionable failure when the
+// REST transport is requested without a Drive credential.
+func TestColabDriveTransportRequiresCredential(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAFTMAKE_DRIVE_REFRESH_TOKEN", "")
+	store, err := newColabDriveStore(colabpkg.SessionAuth{SessionID: "gpu"})
+	if err == nil {
+		t.Fatal("expected an error without a Drive credential")
+	}
+	if store != nil {
+		t.Fatal("no store should be built without a credential")
+	}
+	if !strings.Contains(err.Error(), "craftmake colab drive login --session gpu") {
+		t.Fatalf("error must give the exact command, got: %v", err)
+	}
+
+	// With a credential the store is built and refreshes through the manager.
+	t.Setenv("CRAFTMAKE_DRIVE_REFRESH_TOKEN", "drive-token")
+	store, err = newColabDriveStore(colabpkg.SessionAuth{SessionID: "gpu"})
+	if err != nil || store == nil {
+		t.Fatalf("expected a store with a credential: %v", err)
+	}
+}
+
+// TestDriveTransportReachesBackendConfig pins that an action's drive_transport
+// reaches the constructed backend, which is what enables the REST upload.
+func TestDriveTransportReachesBackendConfig(t *testing.T) {
+	config := resolveColabBackendConfig(commonOptions{colab: &action.ColabSpec{
+		Session:        "gpu",
+		SyncIn:         true,
+		SyncOut:        true,
+		DriveTransport: "rest",
+		DriveFolder:    "my-folder",
+	}}, "", "", false, t.TempDir())
+	if config.DriveTransport != "rest" || config.DriveFolder != "my-folder" {
+		t.Fatalf("action drive transport not propagated: %#v", config)
+	}
+	if got := colabpkg.NormalizeDriveTransport(config.DriveTransport); got != colabpkg.DriveTransportREST {
+		t.Fatalf("normalised transport = %q, want rest", got)
 	}
 }
