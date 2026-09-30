@@ -15,8 +15,11 @@ type DriveFileClient struct {
 	BaseURL     string
 	Client      HTTPDoer
 	BearerToken string
-	ReadPath    string
-	WritePath   string
+	// GetAccessToken, when set, supplies a fresh OAuth access token for each
+	// request; BearerToken is used as a static fallback.
+	GetAccessToken func() (string, error)
+	ReadPath       string
+	WritePath      string
 }
 
 func NewDriveFileClient(baseURL, bearerToken string, client HTTPDoer) *DriveFileClient {
@@ -24,6 +27,17 @@ func NewDriveFileClient(baseURL, bearerToken string, client HTTPDoer) *DriveFile
 		client = http.DefaultClient
 	}
 	return &DriveFileClient{BaseURL: strings.TrimRight(baseURL, "/"), Client: client, BearerToken: bearerToken, ReadPath: "/drive/read", WritePath: "/drive/write"}
+}
+
+// authorization returns the bearer token for a request, preferring a freshly
+// fetched access token when a provider is configured.
+func (c *DriveFileClient) authorization() string {
+	if c.GetAccessToken != nil {
+		if token, err := c.GetAccessToken(); err == nil && token != "" {
+			return token
+		}
+	}
+	return c.BearerToken
 }
 
 // Get downloads the file at remotePath and returns its bytes.
@@ -46,8 +60,8 @@ func (c *DriveFileClient) Get(ctx context.Context, remotePath string) ([]byte, e
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.BearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	if token := c.authorization(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	response, err := c.Client.Do(req)
 	if err != nil {
@@ -82,8 +96,8 @@ func (c *DriveFileClient) Put(ctx context.Context, remotePath string, content []
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.BearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	if token := c.authorization(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	response, err := c.Client.Do(req)
 	if err != nil {

@@ -3,6 +3,7 @@ package colab
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/otterlab-bio/craftmake/internal/backend"
@@ -22,6 +23,29 @@ func (r DriveResultReader) ReadResultFile(ctx context.Context, path string) ([]b
 	}
 	return r.Client.Get(ctx, path)
 }
+
+// DriveFileMaterializer copies remote step logs from the durable workspace onto
+// the local machine through a DriveFileClient.
+type DriveFileMaterializer struct{ Client *DriveFileClient }
+
+func (m DriveFileMaterializer) Materialize(ctx context.Context, remotePath, localPath string) error {
+	if m.Client == nil {
+		return fmt.Errorf("Drive file materializer requires a Drive file client")
+	}
+	if localPath == "" {
+		return fmt.Errorf("Drive file materializer requires a local path")
+	}
+	data, err := m.Client.Get(ctx, remotePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(localPath, data, 0o644)
+}
+
+var _ LogMaterializer = DriveFileMaterializer{}
 
 // RecoverSubmission reconstructs completed task outcomes from durable remote
 // result files without restarting the runtime. It only accepts a validated

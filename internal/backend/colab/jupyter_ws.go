@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -108,6 +109,20 @@ func (e *JupyterWebSocketExecutor) ExecuteNotebook(ctx context.Context, runtime 
 	if err := json.Unmarshal(notebook, &nb); err != nil {
 		return "", fmt.Errorf("decode notebook: %w", err)
 	}
+	cells := make([]string, 0, len(nb.Cells))
+	for _, cell := range nb.Cells {
+		if cell.CellType != "code" || strings.TrimSpace(cell.Source) == "" {
+			continue
+		}
+		cells = append(cells, cell.Source)
+	}
+	return e.executeCells(ctx, runtime, cells)
+}
+
+// executeCells dials the runtime kernel, runs each cell in order and returns the
+// accumulated output. It is the single place that talks to the kernel, shared
+// by notebook execution and workspace sync.
+func (e *JupyterWebSocketExecutor) executeCells(ctx context.Context, runtime Runtime, cells []string) (string, error) {
 	session := e.SessionID
 	if session == "" {
 		session = "craftmake"
@@ -149,22 +164,151 @@ func (e *JupyterWebSocketExecutor) ExecuteNotebook(ctx context.Context, runtime 
 		e.mu.Unlock()
 	}()
 	var output strings.Builder
-	for _, cell := range nb.Cells {
-		if cell.CellType != "code" || strings.TrimSpace(cell.Source) == "" {
+	for _, cell := range cells {
+		if strings.TrimSpace(cell) == "" {
 			continue
 		}
-		msgID, err := e.sendExecuteRequest(conn, session, cell.Source)
+		msgID, err := e.sendExecuteRequest(conn, session, cell)
 		if err != nil {
-			return "", &RemoteError{Kind: ErrorKernelDisconnected, Operation: "send execute_request", Err: err}
+			return output.String(), &RemoteError{Kind: ErrorKernelDisconnected, Operation: "send execute_request", Err: err}
 		}
 		cellOutput, err := e.drainUntilReply(ctx, conn, session, msgID)
 		if err != nil {
-			return "", err
+			return output.String(), err
 		}
 		output.WriteString(cellOutput)
 	}
 	return output.String(), nil
 }
+
+// WorkspaceTransport moves a workspace archive to and from the runtime kernel.
+// Both directions are opt-in (`colab.sync_in` / `colab.sync_out`) because large
+// payloads belong on Drive rather than in a kernel message.
+type WorkspaceTransport interface {
+	UploadWorkspace(context.Context, Runtime, []byte) error
+	// DownloadWorkspace returns a tar.gz of the remote workspace root whose
+	// member names are relative to that root.
+	DownloadWorkspace(context.Context, Runtime, string, []string) ([]byte, error)
+}
+
+const syncOutBegin = "CRAFTMAKE_SYNC_OUT_BEGIN"
+const syncOutEnd = "CRAFTMAKE_SYNC_OUT_END"
+
+// UploadWorkspace writes an archive (member names are absolute remote paths)
+// into the runtime filesystem.
+func (e *JupyterWebSocketExecutor) UploadWorkspace(ctx context.Context, runtime Runtime, archive []byte) error {
+	if len(archive) == 0 {
+		return nil
+	}
+	if len(archive) > workspaceArchiveLimit() {
+		return fmt.Errorf("workspace archive exceeds the %d byte sync limit", workspaceArchiveLimit())
+	}
+	cell := fmt.Sprintf(`import base64, io, os, tarfile
+from pathlib import Path
+
+_payload = base64.b64decode(%s)
+# Colab's filesystem root is "/"; CRAFTMAKE_COLAB_ROOT lets an emulated runtime
+# relocate the workspace prefix.
+_base = Path(os.environ.get("CRAFTMAKE_COLAB_ROOT", "/"))
+with tarfile.open(fileobj=io.BytesIO(_payload), mode="r:gz") as _tar:
+    _count = 0
+    for _member in _tar.getmembers():
+        if not _member.isfile():
+            continue
+        _target = _base / _member.name
+        _target.parent.mkdir(parents=True, exist_ok=True)
+        _source = _tar.extractfile(_member)
+        if _source is None:
+            continue
+        with open(_target, "wb") as _out:
+            _out.write(_source.read())
+        _count += 1
+print("CRAFTMAKE_SYNC_IN_OK", _count)
+`, pythonString(base64.StdEncoding.EncodeToString(archive)))
+	output, err := e.executeCells(ctx, runtime, []string{cell})
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(output, "CRAFTMAKE_SYNC_IN_OK") {
+		return &RemoteError{Kind: ErrorProtocolMismatch, Operation: "upload workspace", Err: fmt.Errorf("runtime did not confirm the workspace upload: %q", strings.TrimSpace(output))}
+	}
+	return nil
+}
+
+// DownloadWorkspace archives the remote workspace root in the runtime and
+// returns the decoded tar.gz.
+func (e *JupyterWebSocketExecutor) DownloadWorkspace(ctx context.Context, runtime Runtime, remoteRoot string, excludes []string) ([]byte, error) {
+	if strings.TrimSpace(remoteRoot) == "" {
+		return nil, fmt.Errorf("workspace download requires a remote root")
+	}
+	excludeList := make([]string, 0, len(excludes))
+	for _, item := range excludes {
+		excludeList = append(excludeList, pythonString(item))
+	}
+	cell := fmt.Sprintf(`import base64, io, tarfile
+from pathlib import Path
+
+_root = Path(%s)
+_excludes = [%s]
+_buffer = io.BytesIO()
+if _root.is_dir():
+    with tarfile.open(fileobj=_buffer, mode="w:gz") as _tar:
+        for _path in sorted(_root.rglob("*")):
+            if not _path.is_file():
+                continue
+            _rel = _path.relative_to(_root).as_posix()
+            if any(_rel == _item or _rel.startswith(_item + "/") for _item in _excludes):
+                continue
+            try:
+                # Member names stay relative to the workspace root; the caller
+                # joins them onto the logical remote root it configured.
+                _tar.add(str(_path), arcname=_rel)
+            except OSError:
+                continue
+print(%s)
+print(base64.b64encode(_buffer.getvalue()).decode())
+print(%s)
+`, pythonString(remoteRoot), strings.Join(excludeList, ", "), pythonString(syncOutBegin), pythonString(syncOutEnd))
+	output, err := e.executeCells(ctx, runtime, []string{cell})
+	if err != nil {
+		return nil, err
+	}
+	return decodeSyncOut(output)
+}
+
+// decodeSyncOut extracts the base64 payload printed between the sync-out
+// sentinels.
+func decodeSyncOut(output string) ([]byte, error) {
+	lines := strings.Split(output, "\n")
+	begin, end := -1, -1
+	for i, line := range lines {
+		switch strings.TrimSpace(line) {
+		case syncOutBegin:
+			begin = i
+		case syncOutEnd:
+			if begin >= 0 {
+				end = i
+			}
+		}
+	}
+	if begin < 0 || end <= begin {
+		return nil, &RemoteError{Kind: ErrorProtocolMismatch, Operation: "download workspace", Err: fmt.Errorf("runtime did not return a workspace archive")}
+	}
+	payload := strings.TrimSpace(strings.Join(lines[begin+1:end], ""))
+	if payload == "" {
+		return nil, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, &RemoteError{Kind: ErrorProtocolMismatch, Operation: "decode workspace archive", Err: err}
+	}
+	if len(decoded) > workspaceArchiveLimit() {
+		return nil, fmt.Errorf("downloaded workspace archive exceeds the %d byte sync limit", workspaceArchiveLimit())
+	}
+	return decoded, nil
+}
+
+var _ WorkspaceTransport = (*JupyterWebSocketExecutor)(nil)
 
 func (e *JupyterWebSocketExecutor) sendExecuteRequest(conn *minimalWSConn, session, code string) (string, error) {
 	msgID := uuid.NewString()

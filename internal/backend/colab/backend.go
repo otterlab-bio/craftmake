@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/otterlab-bio/craftmake/internal/backend"
 	"github.com/otterlab-bio/craftmake/pkg/protocol"
@@ -74,6 +75,11 @@ type Backend struct {
 	Workspace      WorkspaceSyncer
 	ResultReader   RemoteResultReader
 	Redactor       *Redactor
+
+	// syncMu guards syncInDone, which memoizes the once-per-run workspace
+	// upload performed by syncWorkspaceIn.
+	syncMu     sync.Mutex
+	syncInDone bool
 }
 
 func (b *Backend) Name() string { return "colab" }
@@ -196,8 +202,25 @@ func (b *Backend) RunSubmission(ctx context.Context, submissionID string, reques
 			result.Tasks[manifest.TaskID] = backend.TaskOutcome{Err: RedactError(b.Redactor, err)}
 			continue
 		}
+		// 2b. Refresh the remote workspace from the local project once per run.
+		if b.Config.SyncIn {
+			if err := b.syncWorkspaceIn(ctx, runtime); err != nil {
+				taskErr := RedactError(b.Redactor, err)
+				result.Tasks[manifest.TaskID] = backend.TaskOutcome{Err: taskErr}
+				if releaseErr := b.Control.ReleaseRuntime(ctx, runtime); releaseErr != nil {
+					_ = releaseErr
+				}
+				continue
+			}
+		}
 		// 3. Execute the manifest on this instance.
 		outcome := b.executeOnRuntime(ctx, runtime, manifest, request.OnStarted)
+		// 3b. Copy the remote workspace back to the local project.
+		if b.Config.SyncOut && outcome.Err == nil {
+			if err := b.syncWorkspaceOut(ctx, runtime); err != nil {
+				outcome.Err = RedactError(b.Redactor, fmt.Errorf("sync workspace from Colab: %w", err))
+			}
+		}
 		// 4. Release the instance immediately — Drive is the durable shared state.
 		if releaseErr := b.Control.ReleaseRuntime(ctx, runtime); releaseErr != nil {
 			if outcome.Err == nil {
@@ -207,6 +230,76 @@ func (b *Backend) RunSubmission(ctx context.Context, submissionID string, reques
 		result.Tasks[manifest.TaskID] = outcome
 	}
 	return result, nil
+}
+
+// syncWorkspaceIn uploads the local workspace to the runtime kernel exactly once
+// per run; later submissions reuse the already-synced remote workspace.
+func (b *Backend) syncWorkspaceIn(ctx context.Context, runtime Runtime) error {
+	transport, ok := b.Executor.(WorkspaceTransport)
+	if !ok {
+		return fmt.Errorf("Colab workspace sync_in requires an executor with workspace transport support (%T)", b.Executor)
+	}
+	b.syncMu.Lock()
+	defer b.syncMu.Unlock()
+	if b.syncInDone {
+		return nil
+	}
+	mapper := PathMapper{HostRoot: b.Config.LocalRoot, RemoteRoot: filepath.Join(b.remoteRoot(), "work"), PathMap: b.Config.PathMap}
+	archive, err := BuildWorkspaceArchive(b.Config.LocalRoot, mapper, b.workspaceExcludes())
+	if err != nil {
+		return err
+	}
+	if err := transport.UploadWorkspace(ctx, runtime, archive); err != nil {
+		return err
+	}
+	b.syncInDone = true
+	return nil
+}
+
+// syncWorkspaceOut downloads the remote workspace and merges it into the local
+// project directory.
+func (b *Backend) syncWorkspaceOut(ctx context.Context, runtime Runtime) error {
+	transport, ok := b.Executor.(WorkspaceTransport)
+	if !ok {
+		return fmt.Errorf("Colab workspace sync_out requires an executor with workspace transport support (%T)", b.Executor)
+	}
+	archive, err := transport.DownloadWorkspace(ctx, runtime, b.remoteRoot(), b.workspaceSyncOutExcludes())
+	if err != nil {
+		return err
+	}
+	if len(archive) == 0 {
+		return nil
+	}
+	mirrorRoot := b.syncOutRoot()
+	if err := os.MkdirAll(mirrorRoot, 0o755); err != nil {
+		return err
+	}
+	return ExtractWorkspaceArchive(archive, mirrorRoot, b.remoteRoot(), b.Config.PathMap, b.workspaceSyncOutExcludes())
+}
+
+// syncOutRoot is the local mirror of the remote workspace. It lives inside the
+// excluded .craftmake directory so a downloaded workspace is never re-uploaded
+// (which would nest work/work/... on every run).
+func (b *Backend) syncOutRoot() string {
+	return filepath.Join(b.Config.LocalRoot, ".craftmake", "colab-workspace")
+}
+
+// workspaceSyncOutExcludes additionally skips craftmake's own remote runtime
+// directory, whose contents are materialized locally as task artifacts.
+func (b *Backend) workspaceSyncOutExcludes() []string {
+	return append(append([]string{}, b.workspaceExcludes()...), "runtime")
+}
+
+// workspaceExcludes returns the configured sync excludes, defaulting to the
+// local state directory and the git database. The local workspace mirror is
+// always excluded so it is never uploaded back into the runtime.
+func (b *Backend) workspaceExcludes() []string {
+	excludes := b.Config.SyncExcludes
+	if len(excludes) == 0 {
+		excludes = []string{".craftmake/state", ".git"}
+	}
+	excludes = append(append([]string{}, excludes...), ".craftmake/colab-workspace")
+	return excludes
 }
 
 // executeOnRuntime builds and runs a single manifest on the given runtime,

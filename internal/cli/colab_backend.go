@@ -162,6 +162,7 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 	client := colabpkg.NewColabServerClient(os.Getenv("CRAFTMAKE_COLAB_DOMAIN"), os.Getenv("CRAFTMAKE_COLAB_GAPI_DOMAIN"), nil)
 	client.AppName = "craftmake"
 	client.ExtensionVersion = "0.1.0"
+	var getAccessToken func() (string, error)
 	if refreshToken, ok := resolveColabRefreshToken(auth); ok {
 		clientID, clientSecret, credentialErr := resolveColabOAuthCredentials("", "")
 		if credentialErr != nil {
@@ -169,7 +170,8 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 		}
 		manager := &colabpkg.TokenManager{Config: colabpkg.TokenConfig{ClientID: clientID, ClientSecret: clientSecret, TokenURL: os.Getenv("CRAFTMAKE_COLAB_TOKEN_URL")}}
 		manager.SetRefreshToken(refreshToken)
-		client.GetAccessToken = func() (string, error) { return manager.AccessToken(context.Background()) }
+		getAccessToken = func() (string, error) { return manager.AccessToken(context.Background()) }
+		client.GetAccessToken = getAccessToken
 	}
 	var executor *colabpkg.JupyterWebSocketExecutor
 	executor = &colabpkg.JupyterWebSocketExecutor{
@@ -228,11 +230,22 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 	if !strings.EqualFold(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"), "off") {
 		mountPreflight = &colabpkg.ServerMountPreflight{Client: client}
 	}
-	factory := colabpkg.NewFactory(colabpkg.FactoryDependencies{
+	dependencies := colabpkg.FactoryDependencies{
 		Server:         client,
 		Executor:       executor,
 		MountPreflight: mountPreflight,
-	})
+	}
+	// A Drive file service (the /drive/read|/drive/write seam) is optional; when
+	// configured it provides real log materialization and result recovery from
+	// the durable workspace. Without it the executor's kernel output is used to
+	// materialize step logs and recovery reports that no reader is configured.
+	if filesURL := strings.TrimSpace(os.Getenv("CRAFTMAKE_COLAB_DRIVE_FILES_URL")); filesURL != "" {
+		driveFiles := colabpkg.NewDriveFileClient(filesURL, "", nil)
+		driveFiles.GetAccessToken = getAccessToken
+		dependencies.Materializer = colabpkg.DriveFileMaterializer{Client: driveFiles}
+		dependencies.ResultReader = colabpkg.DriveResultReader{Client: driveFiles}
+	}
+	factory := colabpkg.NewFactory(dependencies)
 	instance, err := factory(ctx, backend.FactoryConfig{
 		ProjectDirectory: config.ProjectDirectory,
 		AuthConfigPath:   path,
