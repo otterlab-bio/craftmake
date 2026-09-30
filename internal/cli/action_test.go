@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	colabpkg "github.com/otterlab-bio/craftmake/internal/backend/colab"
 	"github.com/otterlab-bio/craftmake/internal/compiler"
 )
 
@@ -121,5 +123,111 @@ func TestLoadActionPlanCompilesSelfContainedAction(t *testing.T) {
 	}
 	if options.resolvedBackend != "local" || string(options.configKind) != "craftmake.action/v1" {
 		t.Fatalf("unexpected options: %#v", options)
+	}
+}
+
+func writeActionFile(t *testing.T, root, name, content string) {
+	t.Helper()
+	dir := filepath.Join(root, ".craftmake")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const colabActionYAML = "schema_version: craftmake.action/v1\nname: hello\nbackend: colab\ncolab:\n  session: yaml-session\n  auth_config: /yaml/colab-auth.json\n  drive_root: /content/drive/MyDrive/from-action\n  remote_root: /content/from-action\n  scratch_root: /content/scratch\n  default_accelerator: gpu\n  sync_in: true\n  sync_out: true\n  excludes:\n    - data\n  path_map:\n    /host/data: /content/drive/MyDrive/data\njobs:\n  greet:\n    steps:\n      - run: echo hello\n"
+
+// TestLoadActionPlanCarriesColabBlock guards the regression where the `colab:`
+// block of an action file was parsed and validated but never handed to the
+// backend builder.
+func TestLoadActionPlanCarriesColabBlock(t *testing.T) {
+	root := t.TempDir()
+	writeActionFile(t, root, "hello", colabActionYAML)
+	_, options, err := loadActionPlan(root, "hello", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.colab == nil {
+		t.Fatal("colab block was not carried into the run options")
+	}
+	if options.colab.Session != "yaml-session" || options.colab.DriveRoot != "/content/drive/MyDrive/from-action" {
+		t.Fatalf("unexpected colab spec: %#v", options.colab)
+	}
+}
+
+func TestResolveColabBackendConfigPrecedence(t *testing.T) {
+	root := t.TempDir()
+	writeActionFile(t, root, "hello", colabActionYAML)
+	_, options, err := loadActionPlan(root, "hello", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Without flags the action file supplies the session and auth config.
+	fromFile := resolveColabBackendConfig(options, "", "~/.config/craftmake/colab-auth.json", false, root)
+	if fromFile.SessionID != "yaml-session" || fromFile.AuthConfig != "/yaml/colab-auth.json" {
+		t.Fatalf("action file config was ignored: %#v", fromFile)
+	}
+	if fromFile.DriveRoot != "/content/drive/MyDrive/from-action" || fromFile.RemoteRoot != "/content/from-action" || fromFile.ScratchRoot != "/content/scratch" {
+		t.Fatalf("action file paths were ignored: %#v", fromFile)
+	}
+	if fromFile.DefaultAccelerator != "gpu" || !fromFile.SyncIn || !fromFile.SyncOut || len(fromFile.Excludes) != 1 {
+		t.Fatalf("action file behaviour flags were ignored: %#v", fromFile)
+	}
+	if fromFile.PathMap["/host/data"] != "/content/drive/MyDrive/data" {
+		t.Fatalf("action file path_map was ignored: %#v", fromFile.PathMap)
+	}
+
+	// Flags win over the action file.
+	fromFlags := resolveColabBackendConfig(options, "flag-session", "/flag/colab-auth.json", true, root)
+	if fromFlags.SessionID != "flag-session" || fromFlags.AuthConfig != "/flag/colab-auth.json" {
+		t.Fatalf("flags must win over the action file: %#v", fromFlags)
+	}
+
+	// Without a colab block only the flags apply.
+	plain := resolveColabBackendConfig(commonOptions{}, "flag-session", "/flag/auth.json", false, root)
+	if plain.SessionID != "flag-session" || plain.AuthConfig != "/flag/auth.json" || plain.DriveRoot != "" {
+		t.Fatalf("unexpected defaults: %#v", plain)
+	}
+}
+
+// TestActionRunHonorsColabSessionFromActionFile runs the real command: with the
+// session declared only in the action file the run must get past backend
+// construction instead of failing with "requires --colab-session".
+func TestActionRunHonorsColabSessionFromActionFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAFTMAKE_COLAB_REFRESH_TOKEN", "")
+	t.Setenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT", "off")
+	// A closed port keeps the eventual control-plane call offline and instant.
+	t.Setenv("CRAFTMAKE_COLAB_DOMAIN", "http://127.0.0.1:1")
+	t.Setenv("CRAFTMAKE_COLAB_GAPI_DOMAIN", "http://127.0.0.1:1")
+
+	root := t.TempDir()
+	writeActionFile(t, root, "hello", colabActionYAML)
+	authPath := filepath.Join(root, "colab-auth.json")
+	if err := colabpkg.UpsertSessionAuth(authPath, colabpkg.SessionAuth{SessionID: "yaml-session", DriveRoot: "/content/drive/MyDrive/craftmake", MountPath: "/content/drive", ColabCredentialFile: "/tmp/c.json", DriveCredentialFile: "/tmp/d.json"}); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) string {
+		command := newActionRunCommand(BuildInfo{})
+		command.SetArgs(args)
+		command.SetOut(io.Discard)
+		command.SetErr(io.Discard)
+		err := command.Execute()
+		if err == nil {
+			return ""
+		}
+		return err.Error()
+	}
+	base := []string{"hello", "--dir", root, "--colab-auth-config", authPath, "--force"}
+
+	if message := run(append(append([]string{}, base...), "--backend", "colab", "--colab-session", "yaml-session")...); strings.Contains(message, "requires --colab-session") {
+		t.Fatalf("explicit session was rejected: %s", message)
+	}
+	// The same command without the flag must still work, using the YAML session.
+	if message := run(append(append([]string{}, base...), "--backend", "colab")...); strings.Contains(message, "requires --colab-session") {
+		t.Fatalf("action file session was ignored: %s", message)
 	}
 }

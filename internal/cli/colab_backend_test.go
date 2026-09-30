@@ -13,6 +13,11 @@ import (
 )
 
 func TestBuildColabBackendLoadsSessionConfig(t *testing.T) {
+	// The refresh-token resolver falls back to $HOME/.config/craftmake/
+	// credentials/<session>.json, so the developer's real credential file must
+	// not influence this test.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAFTMAKE_COLAB_REFRESH_TOKEN", "")
 	authPath := filepath.Join(t.TempDir(), "auth.json")
 	if err := colabpkg.UpsertSessionAuth(authPath, colabpkg.SessionAuth{SessionID: "gpu", DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", ColabCredentialFile: "/tmp/colab.json", DriveCredentialFile: "/tmp/drive.json"}); err != nil {
 		t.Fatal(err)
@@ -27,6 +32,75 @@ func TestBuildColabBackendLoadsSessionConfig(t *testing.T) {
 	}
 	if colabBackend.Config.SessionID != "gpu" || colabBackend.Config.DriveRoot != "/content/drive/MyDrive/project" {
 		t.Fatalf("session config not loaded: %#v", colabBackend.Config)
+	}
+}
+
+// TestBuildColabBackendRequiresOAuthClientForStoredToken covers the other half
+// of the resolver: once a refresh token exists, the OAuth client credentials
+// must be supplied.
+func TestBuildColabBackendRequiresOAuthClientForStoredToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "")
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "")
+	t.Setenv("CRAFTMAKE_COLAB_REFRESH_TOKEN", "")
+	credFile := filepath.Join(t.TempDir(), "gpu.json")
+	if err := os.WriteFile(credFile, []byte("refresh-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := colabpkg.UpsertSessionAuth(authPath, colabpkg.SessionAuth{SessionID: "gpu", DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", ColabCredentialFile: credFile, DriveCredentialFile: credFile}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildColabBackend(context.Background(), colabBackendConfig{SessionID: "gpu", AuthConfig: authPath, ProjectDirectory: "/local/project"}); err == nil {
+		t.Fatal("expected an error when a refresh token exists without OAuth client credentials")
+	}
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "client-id")
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "client-secret")
+	if _, err := buildColabBackend(context.Background(), colabBackendConfig{SessionID: "gpu", AuthConfig: authPath, ProjectDirectory: "/local/project"}); err != nil {
+		t.Fatalf("expected the backend to build with OAuth credentials: %v", err)
+	}
+}
+
+// TestBuildColabBackendAppliesActionOverrides checks the `colab:` block of an
+// action file reaches the constructed backend.
+func TestBuildColabBackendAppliesActionOverrides(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAFTMAKE_COLAB_REFRESH_TOKEN", "")
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := colabpkg.UpsertSessionAuth(authPath, colabpkg.SessionAuth{SessionID: "gpu", DriveRoot: "/content/drive/MyDrive/session", MountPath: "/content/drive", ColabCredentialFile: "/tmp/colab.json", DriveCredentialFile: "/tmp/drive.json"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := buildColabBackend(context.Background(), colabBackendConfig{
+		SessionID:          "gpu",
+		AuthConfig:         authPath,
+		ProjectDirectory:   "/local/project",
+		DriveRoot:          "/content/drive/MyDrive/from-action",
+		ScratchRoot:        "/content/scratch",
+		DefaultAccelerator: "gpu",
+		SyncIn:             true,
+		SyncOut:            true,
+		Excludes:           []string{"data"},
+		PathMap:            map[string]string{"/host/data": "/content/drive/MyDrive/data"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	colabBackend, ok := b.(*colabpkg.Backend)
+	if !ok {
+		t.Fatalf("expected *colab.Backend, got %T", b)
+	}
+	config := colabBackend.Config
+	if config.DriveRoot != "/content/drive/MyDrive/from-action" {
+		t.Fatalf("drive_root override not applied: %#v", config)
+	}
+	if config.ScratchRoot != "/content/scratch" || config.DefaultAccelerator != "gpu" {
+		t.Fatalf("path/accelerator overrides not applied: %#v", config)
+	}
+	if !config.SyncIn || !config.SyncOut || len(config.SyncExcludes) != 1 {
+		t.Fatalf("sync overrides not applied: %#v", config)
+	}
+	if config.PathMap["/host/data"] != "/content/drive/MyDrive/data" {
+		t.Fatalf("path_map override not applied: %#v", config.PathMap)
 	}
 }
 
@@ -49,8 +123,7 @@ func TestResolveColabRefreshTokenFromCredentialFile(t *testing.T) {
 }
 
 func TestResolveColabRefreshTokenFallsBackToEnv(t *testing.T) {
-	_ = os.Setenv("CRAFTMAKE_TEST_REFRESH", "refresh-from-env")
-	defer os.Unsetenv("CRAFTMAKE_TEST_REFRESH")
+	t.Setenv("CRAFTMAKE_TEST_REFRESH", "refresh-from-env")
 	auth := colabpkg.SessionAuth{ColabRefreshTokenEnv: "CRAFTMAKE_TEST_REFRESH"}
 	token, ok := resolveColabRefreshToken(auth)
 	if !ok || token != "refresh-from-env" {

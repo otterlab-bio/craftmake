@@ -46,6 +46,9 @@ func TestColabAuthCLIConfiguresAndMountsNamedSession(t *testing.T) {
 }
 
 func TestColabDriveMountAuthorizeWithAlreadyAuthorizedSession(t *testing.T) {
+	// Isolate HOME: the resolver falls back to
+	// $HOME/.config/craftmake/credentials/<session>.json.
+	t.Setenv("HOME", t.TempDir())
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {

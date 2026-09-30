@@ -56,6 +56,13 @@ type Config struct {
 	LocalRoot          string
 	SyncExcludes       []string
 	DefaultAccelerator string
+	// SyncIn/SyncOut enable the workspace archive sync performed through the
+	// runtime's kernel (see NotebookOptions).
+	SyncIn  bool
+	SyncOut bool
+	// PathMap maps host path prefixes to remote path prefixes for workspace
+	// sync, mirroring the action file's `colab.path_map`.
+	PathMap map[string]string
 }
 
 type Backend struct {

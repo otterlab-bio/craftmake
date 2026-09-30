@@ -31,11 +31,74 @@ func backendForNameWithColab(ctx context.Context, backendName string, config col
 }
 
 // colabBackendConfig carries the flags needed to build a Colab backend from a
-// configured session.
+// configured session, plus the per-action `colab:` overrides declared in the
+// action file.
 type colabBackendConfig struct {
 	SessionID        string
 	AuthConfig       string
 	ProjectDirectory string
+
+	// Overrides from the action's `colab:` block. Empty values leave the
+	// session/auth configuration in charge.
+	DriveRoot          string
+	RemoteRoot         string
+	ScratchRoot        string
+	DefaultAccelerator string
+	SyncIn             bool
+	SyncOut            bool
+	Excludes           []string
+	PathMap            map[string]string
+}
+
+// resolveColabBackendConfig merges the action's `colab:` block with the CLI
+// flags. Precedence is flag > action file > session/auth configuration, and a
+// session declared only in the action file is honored when --colab-session is
+// absent.
+func resolveColabBackendConfig(options commonOptions, sessionFlag, authConfigFlag string, authConfigChanged bool, projectDir string) colabBackendConfig {
+	config := colabBackendConfig{SessionID: sessionFlag, AuthConfig: authConfigFlag, ProjectDirectory: projectDir}
+	spec := options.colab
+	if spec == nil {
+		return config
+	}
+	if config.SessionID == "" {
+		config.SessionID = spec.Session
+	}
+	if !authConfigChanged && spec.AuthConfig != "" {
+		config.AuthConfig = spec.AuthConfig
+	}
+	config.DriveRoot = spec.DriveRoot
+	config.RemoteRoot = spec.RemoteRoot
+	config.ScratchRoot = spec.ScratchRoot
+	config.DefaultAccelerator = spec.DefaultAccelerator
+	config.SyncIn = spec.SyncIn
+	config.SyncOut = spec.SyncOut
+	config.Excludes = spec.Excludes
+	config.PathMap = spec.PathMap
+	return config
+}
+
+// applyColabOverrides copies the action-level overrides onto the constructed
+// backend. The factory derives paths from the session auth file, so only
+// non-empty overrides win.
+func applyColabOverrides(backendInstance *colabpkg.Backend, config colabBackendConfig) {
+	if config.DriveRoot != "" {
+		backendInstance.Config.DriveRoot = config.DriveRoot
+	}
+	if config.RemoteRoot != "" {
+		backendInstance.Config.RemoteRoot = config.RemoteRoot
+	}
+	if config.ScratchRoot != "" {
+		backendInstance.Config.ScratchRoot = config.ScratchRoot
+	}
+	if config.DefaultAccelerator != "" {
+		backendInstance.Config.DefaultAccelerator = config.DefaultAccelerator
+	}
+	if len(config.Excludes) > 0 {
+		backendInstance.Config.SyncExcludes = config.Excludes
+	}
+	backendInstance.Config.SyncIn = config.SyncIn
+	backendInstance.Config.SyncOut = config.SyncOut
+	backendInstance.Config.PathMap = config.PathMap
 }
 
 // resolveColabRefreshToken returns the Colab refresh token from the session's
@@ -170,9 +233,18 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 		Executor:       executor,
 		MountPreflight: mountPreflight,
 	})
-	return factory(ctx, backend.FactoryConfig{
+	instance, err := factory(ctx, backend.FactoryConfig{
 		ProjectDirectory: config.ProjectDirectory,
 		AuthConfigPath:   path,
 		SessionID:        config.SessionID,
 	})
+	if err != nil {
+		return nil, err
+	}
+	colabBackend, ok := instance.(*colabpkg.Backend)
+	if !ok {
+		return nil, fmt.Errorf("unexpected Colab backend type %T", instance)
+	}
+	applyColabOverrides(colabBackend, config)
+	return colabBackend, nil
 }

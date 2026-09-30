@@ -57,6 +57,10 @@ type commonOptions struct {
 	legacyConfig         bool
 	referenceBuildConfig bool
 	gateMode             bool
+	// colab carries the `colab:` block of an action file so `action run` can
+	// honor the session and Drive configuration declared in the action. CLI
+	// flags still take precedence.
+	colab *actionadapter.ColabSpec
 }
 
 func (options commonOptions) permitsMutableOverrides() bool {

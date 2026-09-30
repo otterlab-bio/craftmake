@@ -30,7 +30,7 @@ func loadActionPlan(projectDir, name string, overrides map[string]string) (*comp
 	if err != nil {
 		return nil, commonOptions{}, fmt.Errorf("compile action %q: %w", name, err)
 	}
-	options := commonOptions{workflowPath: path, projectDir: projectDir, stateDir: filepath.Join(projectDir, ".craftmake", "state"), resolvedBackend: loaded.Context.Workflow.Backend, configKind: standalone.ConfigKindAction}
+	options := commonOptions{workflowPath: path, projectDir: projectDir, stateDir: filepath.Join(projectDir, ".craftmake", "state"), resolvedBackend: loaded.Context.Workflow.Backend, configKind: standalone.ConfigKindAction, colab: loaded.Action.Colab}
 	return plan, options, nil
 }
 
@@ -184,7 +184,8 @@ func newActionRunCommand(buildInfo BuildInfo) *cobra.Command {
 		}
 		var selectedBackend backend.Backend
 		if backendName == "colab" {
-			colabBackend, colabErr := buildColabBackend(command.Context(), colabBackendConfig{SessionID: colabSessionID, AuthConfig: colabAuthConfig, ProjectDirectory: options.projectDir})
+			colabConfig := resolveColabBackendConfig(options, colabSessionID, colabAuthConfig, command.Flags().Changed("colab-auth-config"), options.projectDir)
+			colabBackend, colabErr := buildColabBackend(command.Context(), colabConfig)
 			if colabErr != nil {
 				return configurationError(colabErr)
 			}
