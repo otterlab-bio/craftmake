@@ -235,12 +235,19 @@ func (b *Backend) executeOnRuntime(ctx context.Context, runtime Runtime, manifes
 }
 
 func (b *Backend) materializeTaskLogs(ctx context.Context, taskResult *protocol.TaskResult, manifest *protocol.TaskManifest, mapping RemoteTaskMapping, output string) error {
+	// Manifest step indexes are 1-based (compiler.go assigns stepIndex+1), so
+	// resolve each reported step by its index instead of using it as a slice
+	// offset.
+	byIndex := make(map[int]protocol.StepManifest, len(manifest.Steps))
+	for _, step := range manifest.Steps {
+		byIndex[step.Index] = step
+	}
 	var failures []string
 	for _, step := range taskResult.Steps {
-		if step.Index < 0 || step.Index >= len(manifest.Steps) {
+		manifestStep, ok := byIndex[step.Index]
+		if !ok {
 			continue
 		}
-		manifestStep := manifest.Steps[step.Index]
 		remoteStdout := step.StdoutPath
 		if remoteStdout == "" {
 			remoteStdout = filepath.Join(mapping.RuntimeDirectory, fmt.Sprintf("step-%d.stdout", step.Index))

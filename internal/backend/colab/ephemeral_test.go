@@ -32,8 +32,8 @@ func TestRunSubmissionRoutesByAccelerator(t *testing.T) {
 	if err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1"}); err != nil {
 		t.Fatal(err)
 	}
-	cpuManifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "cpu-task", Resources: protocol.ResourceRequest{Accelerator: "cpu"}, Steps: []protocol.StepManifest{{Index: 0, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
-	gpuManifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "gpu-task", Resources: protocol.ResourceRequest{Accelerator: "gpu"}, Steps: []protocol.StepManifest{{Index: 0, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
+	cpuManifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "cpu-task", Resources: protocol.ResourceRequest{Accelerator: "cpu"}, Steps: []protocol.StepManifest{{Index: 1, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
+	gpuManifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "gpu-task", Resources: protocol.ResourceRequest{Accelerator: "gpu"}, Steps: []protocol.StepManifest{{Index: 1, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
 	if _, err := b.RunSubmission(context.Background(), "sub-1", backendpkg.SubmissionRequest{Manifests: []*protocol.TaskManifest{cpuManifest, gpuManifest}}); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestRunSubmissionDefaultAccelerator(t *testing.T) {
 	if err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1"}); err != nil {
 		t.Fatal(err)
 	}
-	manifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "t", Steps: []protocol.StepManifest{{Index: 0, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
+	manifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "t", Steps: []protocol.StepManifest{{Index: 1, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
 	if _, err := b.RunSubmission(context.Background(), "sub-1", backendpkg.SubmissionRequest{Manifests: []*protocol.TaskManifest{manifest}}); err != nil {
 		t.Fatal(err)
 	}
@@ -111,8 +111,8 @@ func TestRunSubmissionConsecutiveSameType(t *testing.T) {
 	if err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1"}); err != nil {
 		t.Fatal(err)
 	}
-	m1 := &protocol.TaskManifest{RunID: "run-1", TaskID: "t1", Resources: protocol.ResourceRequest{Accelerator: "cpu"}, Steps: []protocol.StepManifest{{Index: 0, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
-	m2 := &protocol.TaskManifest{RunID: "run-1", TaskID: "t2", Resources: protocol.ResourceRequest{Accelerator: "cpu"}, Steps: []protocol.StepManifest{{Index: 0, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
+	m1 := &protocol.TaskManifest{RunID: "run-1", TaskID: "t1", Resources: protocol.ResourceRequest{Accelerator: "cpu"}, Steps: []protocol.StepManifest{{Index: 1, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
+	m2 := &protocol.TaskManifest{RunID: "run-1", TaskID: "t2", Resources: protocol.ResourceRequest{Accelerator: "cpu"}, Steps: []protocol.StepManifest{{Index: 1, Name: "s", StdoutPath: "/tmp/o", StderrPath: "/tmp/e"}}}
 	if _, err := b.RunSubmission(context.Background(), "sub-1", backendpkg.SubmissionRequest{Manifests: []*protocol.TaskManifest{m1, m2}}); err != nil {
 		t.Fatal(err)
 	}

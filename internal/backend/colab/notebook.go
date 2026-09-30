@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/otterlab-bio/craftmake/pkg/protocol"
@@ -108,30 +109,69 @@ func bashSource(step protocol.StepManifest, mapping RemoteTaskMapping) string {
 		stderr = filepath.Join(mapping.RuntimeDirectory, fmt.Sprintf("step-%d.stderr", step.Index))
 	}
 	exitPath := shellString(filepath.Join(mapping.RuntimeDirectory, fmt.Sprintf("step-%d.exit", step.Index)))
-	lines = append(lines, "set +e", "("+step.Command+") >"+shellString(stdout)+" 2>"+shellString(stderr), "code=$?", fmt.Sprintf("printf '%%s\\n' \"$code\" > %s", exitPath), "exit 0")
+	startPath := shellString(filepath.Join(mapping.RuntimeDirectory, fmt.Sprintf("step-%d.start", step.Index)))
+	endPath := shellString(filepath.Join(mapping.RuntimeDirectory, fmt.Sprintf("step-%d.end", step.Index)))
+	// Step artifacts are keyed by the manifest's step index, which the compiler
+	// assigns 1-based (see compiler.go). The finalizer must read the same keys.
+	lines = append(lines,
+		"set +e",
+		fmt.Sprintf("date +%%s > %s", startPath),
+		"("+step.Command+") >"+shellString(stdout)+" 2>"+shellString(stderr),
+		"code=$?",
+		fmt.Sprintf("date +%%s > %s", endPath),
+		fmt.Sprintf("printf '%%s\\n' \"$code\" > %s", exitPath),
+		"exit 0",
+	)
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// finalizerSource renders the cell that collects the per-step exit codes
+// written by the %%bash cells and emits the task result payload.
+//
+// Step artifacts are keyed by protocol.StepManifest.Index (1-based as produced
+// by the compiler), so the finalizer iterates the manifest's real indices
+// instead of assuming a 0-based range. A missing exit file is reported as a
+// failure rather than silently treated as success.
 func finalizerSource(manifest *protocol.TaskManifest, mapping RemoteTaskMapping) string {
-	stepCount := len(manifest.Steps)
+	indices := make([]string, 0, len(manifest.Steps))
+	for _, step := range manifest.Steps {
+		indices = append(indices, strconv.Itoa(step.Index))
+	}
 	return fmt.Sprintf(`import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 runtime_dir = Path(%s)
 result_path = Path(%s)
-step_count = %d
+step_indices = [%s]
+
+
+def _timestamp(name):
+    path = runtime_dir / name
+    if not path.exists():
+        return None
+    raw = path.read_text().strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromtimestamp(float(raw), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return None
+
 
 steps = []
 overall_exit = 0
-for i in range(step_count):
+for i in step_indices:
     exit_file = runtime_dir / f"step-{i}.exit"
-    code = int(exit_file.read_text().strip()) if exit_file.exists() else 0
+    code = int(exit_file.read_text().strip()) if exit_file.exists() else -1
     if code != 0 and overall_exit == 0:
         overall_exit = code
     steps.append({
         "index": i,
         "status": "succeeded" if code == 0 else "failed",
         "exit_code": code,
+        "started_at": _timestamp(f"step-{i}.start"),
+        "finished_at": _timestamp(f"step-{i}.end"),
         "stdout_path": str(runtime_dir / f"step-{i}.stdout"),
         "stderr_path": str(runtime_dir / f"step-{i}.stderr"),
     })
@@ -145,7 +185,7 @@ payload = {
     "exit_code": overall_exit,
     "steps": steps,
 }
-for i in range(step_count):
+for i in step_indices:
     stdout_file = runtime_dir / f"step-{i}.stdout"
     if stdout_file.exists():
         text = stdout_file.read_text().strip()
@@ -166,7 +206,7 @@ except Exception:
 print("CRAFTMAKE_TASK_RESULT_BEGIN")
 print(json.dumps(payload, sort_keys=True))
 print("CRAFTMAKE_TASK_RESULT_END")
-`, pythonString(mapping.RuntimeDirectory), pythonString(mapping.ResultPath), stepCount, protocol.Version, pythonString(manifest.RunID), pythonString(manifest.TaskID), manifest.Attempt)
+`, pythonString(mapping.RuntimeDirectory), pythonString(mapping.ResultPath), strings.Join(indices, ", "), protocol.Version, pythonString(manifest.RunID), pythonString(manifest.TaskID), manifest.Attempt)
 }
 
 func pythonString(value string) string { encoded, _ := json.Marshal(value); return string(encoded) }

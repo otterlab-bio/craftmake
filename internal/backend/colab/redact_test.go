@@ -31,7 +31,7 @@ func TestRedactorNilAndEmptyAreNoop(t *testing.T) {
 }
 
 func TestBuildNotebookRedactedScrubsCellSources(t *testing.T) {
-	manifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "task-1", Attempt: 1, Steps: []protocol.StepManifest{{Index: 0, Command: "echo $TOKEN", Env: map[string]string{"TOKEN": "super-secret-value"}}}}
+	manifest := &protocol.TaskManifest{RunID: "run-1", TaskID: "task-1", Attempt: 1, Steps: []protocol.StepManifest{{Index: 1, Command: "echo $TOKEN", Env: map[string]string{"TOKEN": "super-secret-value"}}}}
 	mapping := RemoteTaskMapping{WorkDirectory: "/w", TempDirectory: "/t", RuntimeDirectory: "/r", ResultPath: "/r/result.json"}
 	redactor := NewRedactor("super-secret-value")
 	nb, err := BuildNotebookRedacted(manifest, mapping, redactor)
