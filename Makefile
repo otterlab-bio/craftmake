@@ -9,7 +9,12 @@ DIST_DIR ?= dist
 VERSION ?= 0.1.0-dev
 COMMIT ?= unknown
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-GO_LDFLAGS ?= -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE)
+# Optional: ship your own Colab OAuth client instead of the bundled public one,
+# e.g. `make build COLAB_CLIENT_ID=... COLAB_CLIENT_SECRET=...`.
+COLAB_CLIENT_ID ?=
+COLAB_CLIENT_SECRET ?=
+COLAB_LDFLAGS = $(if $(COLAB_CLIENT_ID),-X github.com/otterlab-bio/craftmake/internal/cli.defaultColabClientID=$(COLAB_CLIENT_ID)) $(if $(COLAB_CLIENT_SECRET),-X github.com/otterlab-bio/craftmake/internal/cli.defaultColabClientSecret=$(COLAB_CLIENT_SECRET))
+GO_LDFLAGS ?= -s -w $(COLAB_LDFLAGS) -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE)
 RELEASE_PLATFORMS ?= linux/amd64 linux/arm64
 
 .PHONY: all build install uninstall release release-archive benchmark-pdx-scheduler test vet check clean

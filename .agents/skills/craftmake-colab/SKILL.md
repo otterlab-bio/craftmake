@@ -53,16 +53,17 @@ Colab sessions store credentials and Drive mount paths in `~/.config/craftmake/c
 ### 3.1 Initial Login (Once per Session)
 
 ```bash
-# Interactive loopback OAuth login using runtime-configured Colab OAuth credentials
-export CRAFTMAKE_COLAB_CLIENT_ID="..."
-export CRAFTMAKE_COLAB_CLIENT_SECRET="..."
+# Interactive loopback OAuth login. No client configuration is required:
+# craftmake bundles the public Cloud SDK "installed app" client that the
+# official Colab CLI also ships (project "colab-cli").
 craftmake colab auth login --session gpu
 ```
 - Starts an ephemeral loopback HTTP server on `127.0.0.1` and uses PKCE.
 - Automatically opens your default browser for authorization.
 - Saves the refresh token to `~/.config/craftmake/credentials/<session>.json` (`0600`).
-- Craftmake does not embed an OAuth client: `CRAFTMAKE_COLAB_CLIENT_ID` and
-  `CRAFTMAKE_COLAB_CLIENT_SECRET` (or `--client-id`/`--client-secret`) are required.
+- Override the client with `CRAFTMAKE_COLAB_CLIENT_ID`/`CRAFTMAKE_COLAB_CLIENT_SECRET`,
+  the `--client-id`/`--client-secret` flags, or
+  `make build COLAB_CLIENT_ID=... COLAB_CLIENT_SECRET=...` (flag > env > bundled).
 - **No re-authentication needed**: Subsequent task runs silently refresh access tokens JIT in <0.5s.
 
 ### 3.2 Inspect & Preflight

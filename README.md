@@ -184,13 +184,23 @@ Colab sessions store credentials and Drive mount preferences in `~/.config/craft
 
 ```bash
 # Login via browser OAuth loopback flow
-export CRAFTMAKE_COLAB_CLIENT_ID="..."
-export CRAFTMAKE_COLAB_CLIENT_SECRET="..."
 craftmake colab auth login --session gpu
 ```
 
 - Binds an ephemeral local port on `127.0.0.1` and uses PKCE.
-- Uses a runtime-configured Google OAuth client with the `https://www.googleapis.com/auth/colaboratory` scope; craftmake deliberately does not embed an OAuth client, so `CRAFTMAKE_COLAB_CLIENT_ID`/`CRAFTMAKE_COLAB_CLIENT_SECRET` (or `--client-id`/`--client-secret`) are required.
+- **No OAuth client configuration is required.** Craftmake bundles the public credentials of Google's Cloud SDK "installed app" client — the same client the official Colab CLI ships in [`src/colab_cli/oauth_config.json`](https://github.com/googlecolab/google-colab-cli/blob/main/src/colab_cli/oauth_config.json) (project `colab-cli`, Apache-2.0) and that colab-vscode calls `..._CLIENT_NOT_SO_SECRET`. Installed-app client secrets are not confidential by design, which is why Google ships it inside its own tooling. Requests the `https://www.googleapis.com/auth/colaboratory` scope.
+- **Use your own client when you distribute craftmake** — the consent screen otherwise names Google's client project, and its quota/availability is outside your control:
+
+  ```bash
+  # runtime override
+  export CRAFTMAKE_COLAB_CLIENT_ID="..." CRAFTMAKE_COLAB_CLIENT_SECRET="..."
+  # or at build time
+  make build COLAB_CLIENT_ID="..." COLAB_CLIENT_SECRET="..."
+  # or per login
+  craftmake colab auth login --session gpu --client-id ... --client-secret ...
+  ```
+
+  Precedence is flag > environment > bundled client.
 - Automatically stores the refresh token in `~/.config/craftmake/credentials/<session>.json` (`0600`).
 - **Login once, run indefinitely**: Subsequent runs transparently refresh access tokens in under 0.5s without browser prompts.
 

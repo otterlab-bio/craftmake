@@ -35,10 +35,10 @@ func TestBuildColabBackendLoadsSessionConfig(t *testing.T) {
 	}
 }
 
-// TestBuildColabBackendRequiresOAuthClientForStoredToken covers the other half
-// of the resolver: once a refresh token exists, the OAuth client credentials
-// must be supplied.
-func TestBuildColabBackendRequiresOAuthClientForStoredToken(t *testing.T) {
+// TestBuildColabBackendUsesBundledOAuthClientForStoredToken covers the other
+// half of the resolver: once a refresh token exists the backend needs an OAuth
+// client, and the bundled public client is used when nothing is configured.
+func TestBuildColabBackendUsesBundledOAuthClientForStoredToken(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "")
 	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "")
@@ -51,13 +51,8 @@ func TestBuildColabBackendRequiresOAuthClientForStoredToken(t *testing.T) {
 	if err := colabpkg.UpsertSessionAuth(authPath, colabpkg.SessionAuth{SessionID: "gpu", DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", ColabCredentialFile: credFile, DriveCredentialFile: credFile}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildColabBackend(context.Background(), colabBackendConfig{SessionID: "gpu", AuthConfig: authPath, ProjectDirectory: "/local/project"}); err == nil {
-		t.Fatal("expected an error when a refresh token exists without OAuth client credentials")
-	}
-	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "client-id")
-	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "client-secret")
 	if _, err := buildColabBackend(context.Background(), colabBackendConfig{SessionID: "gpu", AuthConfig: authPath, ProjectDirectory: "/local/project"}); err != nil {
-		t.Fatalf("expected the backend to build with OAuth credentials: %v", err)
+		t.Fatalf("expected the bundled OAuth client to be used without configuration: %v", err)
 	}
 }
 

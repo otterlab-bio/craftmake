@@ -93,6 +93,101 @@ func TestColabAuthLoginEndToEnd(t *testing.T) {
 	}
 }
 
+// TestResolveColabOAuthCredentialsPrefersExplicitThenEnvThenBundled pins the
+// precedence for the OAuth client used by login and token refresh.
+func TestResolveColabOAuthCredentialsPrefersExplicitThenEnvThenBundled(t *testing.T) {
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "")
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "")
+
+	if defaultColabClientID == "" || defaultColabClientSecret == "" {
+		t.Fatal("a public client must be bundled so login works without configuration")
+	}
+	clientID, clientSecret, err := resolveColabOAuthCredentials("", "")
+	if err != nil {
+		t.Fatalf("bundled client should resolve without configuration: %v", err)
+	}
+	if clientID != defaultColabClientID || clientSecret != defaultColabClientSecret {
+		t.Fatalf("expected the bundled client, got %q", clientID)
+	}
+
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "env-id")
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "env-secret")
+	clientID, clientSecret, err = resolveColabOAuthCredentials("", "")
+	if err != nil || clientID != "env-id" || clientSecret != "env-secret" {
+		t.Fatalf("environment must override the bundled client: %q %q %v", clientID, clientSecret, err)
+	}
+
+	clientID, clientSecret, err = resolveColabOAuthCredentials("flag-id", "flag-secret")
+	if err != nil || clientID != "flag-id" || clientSecret != "flag-secret" {
+		t.Fatalf("flags must override the environment: %q %q %v", clientID, clientSecret, err)
+	}
+}
+
+// TestColabAuthLoginUsesBundledClientWithoutEnv runs the whole login flow with
+// no OAuth client configured at all: the authorization URL must carry the
+// bundled public client and the callback must still provision credentials.
+func TestColabAuthLoginUsesBundledClientWithoutEnv(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "a", "refresh_token": "r", "expires_in": 3600, "token_type": "Bearer"})
+	}))
+	defer tokenServer.Close()
+	userServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "T", "email": "t@e.com"})
+	}))
+	defer userServer.Close()
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "")
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "")
+	t.Setenv("CRAFTMAKE_COLAB_TOKEN_URL", tokenServer.URL)
+	t.Setenv("CRAFTMAKE_COLAB_USERINFO_URL", userServer.URL)
+
+	configPath := filepath.Join(t.TempDir(), "colab-auth.json")
+	cmd := newColabAuthLoginCommand()
+	cmd.SetArgs([]string{"--config", configPath, "--session", "gpu", "--timeout", "5s"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+
+	var authURL string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		text := out.String()
+		if idx := strings.Index(text, "https://accounts.google.com/o/oauth2/v2/auth?"); idx >= 0 {
+			line := text[idx:]
+			if end := strings.IndexAny(line, " \n"); end > 0 {
+				line = line[:end]
+			}
+			authURL = line
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if authURL == "" {
+		t.Fatalf("no auth URL printed: %q", out.String())
+	}
+	parsed, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Query().Get("client_id"); got != defaultColabClientID {
+		t.Fatalf("client_id = %q, want the bundled client", got)
+	}
+	if got := parsed.Query().Get("redirect_uri"); !strings.HasPrefix(got, "http://127.0.0.1:") {
+		t.Fatalf("redirect_uri = %q, want the loopback address", got)
+	}
+	resp, err := http.Get(parsed.Query().Get("redirect_uri") + "?code=c&state=nonce%3Dgpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("login with the bundled client failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(configPath), "credentials", "gpu.json")); err != nil {
+		t.Fatalf("credential file not written: %v", err)
+	}
+}
+
 func TestColabAuthLoginUsesConfiguredClientAndColabScope(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "a", "refresh_token": "r", "expires_in": 3600, "token_type": "Bearer"})

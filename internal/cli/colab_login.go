@@ -13,14 +13,33 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Colab OAuth credentials are intentionally supplied at runtime rather than
-// embedded in the binary or repository. Set CRAFTMAKE_COLAB_CLIENT_ID and
-// CRAFTMAKE_COLAB_CLIENT_SECRET, or pass --client-id/--client-secret to login.
-const (
-	defaultColabClientID     = ""
-	defaultColabClientSecret = ""
+// Bundled Colab OAuth client.
+//
+// These are the public credentials of Google's Cloud SDK "installed app"
+// client. It is the client the official Colab CLI bundles in
+// src/colab_cli/oauth_config.json (project "colab-cli", Apache-2.0) and the one
+// colab-vscode refers to with the environment variable
+// COLAB_EXTENSION_CLIENT_NOT_SO_SECRET. Installed-app client secrets are not
+// confidential by design (a desktop app cannot keep one), which is why Google
+// ships it inside its own tooling.
+//
+// Bundling it means `craftmake colab auth login` and `colab drive mount
+// --authorize` work with no setup. Override it in any of these ways when you
+// want your own OAuth client (recommended for distributions):
+//
+//	CRAFTMAKE_COLAB_CLIENT_ID / CRAFTMAKE_COLAB_CLIENT_SECRET   (runtime)
+//	--client-id / --client-secret                               (login flags)
+//	go build -ldflags "-X github.com/otterlab-bio/craftmake/internal/cli.defaultColabClientID=<id> \
+//	                   -X github.com/otterlab-bio/craftmake/internal/cli.defaultColabClientSecret=<secret>"
+//
+// `make build COLAB_CLIENT_ID=... COLAB_CLIENT_SECRET=...` wires the last form.
+var (
+	defaultColabClientID     = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
+	defaultColabClientSecret = "d-FL95Q19q7MQFpd7hHD0Ty"
 )
 
+// resolveColabOAuthCredentials resolves the OAuth client for the loopback login
+// and for token refresh. Precedence: explicit flag, environment, bundled client.
 func resolveColabOAuthCredentials(clientID, clientSecret string) (string, string, error) {
 	if clientID == "" {
 		clientID = os.Getenv("CRAFTMAKE_COLAB_CLIENT_ID")
@@ -28,8 +47,14 @@ func resolveColabOAuthCredentials(clientID, clientSecret string) (string, string
 	if clientSecret == "" {
 		clientSecret = os.Getenv("CRAFTMAKE_COLAB_CLIENT_SECRET")
 	}
+	if clientID == "" {
+		clientID = defaultColabClientID
+	}
+	if clientSecret == "" {
+		clientSecret = defaultColabClientSecret
+	}
 	if clientID == "" || clientSecret == "" {
-		return "", "", fmt.Errorf("Colab OAuth credentials are required; set CRAFTMAKE_COLAB_CLIENT_ID and CRAFTMAKE_COLAB_CLIENT_SECRET or pass --client-id and --client-secret")
+		return "", "", fmt.Errorf("Colab OAuth credentials are required; set CRAFTMAKE_COLAB_CLIENT_ID and CRAFTMAKE_COLAB_CLIENT_SECRET, pass --client-id and --client-secret, or build with a bundled client")
 	}
 	return clientID, clientSecret, nil
 }

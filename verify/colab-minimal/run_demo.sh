@@ -120,9 +120,9 @@ CRAFTMAKE="$BIN/craftmake"
 
 # ------------------------------------------------------------------ session
 
-echo "==> configuring session 'demo'"
-export CRAFTMAKE_COLAB_CLIENT_ID="demo-client-id"
-export CRAFTMAKE_COLAB_CLIENT_SECRET="demo-client-secret"
+echo "==> configuring session 'demo' (no OAuth client configured: the bundled public client is used)"
+# Deliberately NOT setting CRAFTMAKE_COLAB_CLIENT_ID/SECRET: the CLI must work
+# out of the box with its bundled public client.
 export CRAFTMAKE_NO_BROWSER=1
 export CRAFTMAKE_COLAB_AUTH_TIMEOUT=30s
 printf 'demo-refresh-token\n' > "$CRED_FILE"
