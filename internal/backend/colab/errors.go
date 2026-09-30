@@ -29,7 +29,13 @@ type MountNotAuthorizedError struct {
 }
 
 func (e *MountNotAuthorizedError) Error() string {
-	return fmt.Sprintf("Drive mount is not authorized for session %q: %v; run `craftmake colab drive authorize --session %s` to authorize once", e.SessionID, e.Err, e.SessionID)
+	// The hint must name a command the CLI actually provides; the Drive
+	// authorization entry point is `colab drive mount --authorize`.
+	command := fmt.Sprintf("craftmake colab drive mount --session %s --authorize", e.SessionID)
+	if e.AuthConfigPath != "" {
+		command = fmt.Sprintf("craftmake colab drive mount --config %s --session %s --authorize", e.AuthConfigPath, e.SessionID)
+	}
+	return fmt.Sprintf("Drive mount is not authorized for session %q: %v; run `%s` once to authorize", e.SessionID, e.Err, command)
 }
 func (e *MountNotAuthorizedError) Unwrap() error { return e.Err }
 

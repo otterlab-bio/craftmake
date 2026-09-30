@@ -157,10 +157,18 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 			}
 		},
 	}
+	// The Drive mount preflight is a real control-plane probe that fails fast
+	// with an authorization URL when the account has not granted Drive access.
+	// Set CRAFTMAKE_COLAB_DRIVE_PREFLIGHT=off to skip it for sessions that do
+	// not need Drive.
+	var mountPreflight colabpkg.DriveMountPreflight = colabpkg.NoopMountPreflight{}
+	if !strings.EqualFold(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"), "off") {
+		mountPreflight = &colabpkg.ServerMountPreflight{Client: client}
+	}
 	factory := colabpkg.NewFactory(colabpkg.FactoryDependencies{
 		Server:         client,
 		Executor:       executor,
-		MountPreflight: colabpkg.NoopMountPreflight{},
+		MountPreflight: mountPreflight,
 	})
 	return factory(ctx, backend.FactoryConfig{
 		ProjectDirectory: config.ProjectDirectory,

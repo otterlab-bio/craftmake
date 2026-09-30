@@ -3,6 +3,7 @@ package colab
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,8 +33,37 @@ func TestBeginRunMountNotAuthorizedReturnsHint(t *testing.T) {
 	if mountErr.SessionID != "gpu" {
 		t.Fatalf("unexpected session: %q", mountErr.SessionID)
 	}
-	if !strings.Contains(err.Error(), "craftmake colab drive authorize --session gpu") {
-		t.Fatalf("error missing authorization hint: %v", err)
+	if !strings.Contains(err.Error(), "craftmake colab drive mount --session gpu --authorize") {
+		t.Fatalf("error missing the real authorization command: %v", err)
+	}
+}
+
+// TestBeginRunMountNotAuthorizedSurfacesURLAndConfigPath checks that the hint
+// is directly actionable: it names the configured auth file and the
+// authorization URL returned by the probe.
+func TestBeginRunMountNotAuthorizedSurfacesURLAndConfigPath(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "colab-auth.json")
+	if err := UpsertSessionAuth(authPath, SessionAuth{SessionID: "gpu", DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", ColabCredentialFile: "/tmp/colab.json", DriveCredentialFile: "/tmp/drive.json"}); err != nil {
+		t.Fatal(err)
+	}
+	b := &Backend{
+		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu", AuthConfigPath: authPath},
+		Control:        &fakeControlPlane{},
+		Executor:       fakeNotebookExecutor{},
+		MountPreflight: fakeMountPreflightResult{err: &DriveAuthorizationRequiredError{SessionID: "gpu", RedirectURI: "https://colab.research.google.com/consent?x=1"}},
+	}
+	err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1", ProjectDirectory: "/local/project"})
+	if err == nil {
+		t.Fatal("expected mount error")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"https://colab.research.google.com/consent?x=1",
+		"craftmake colab drive mount --config " + authPath + " --session gpu --authorize",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q missing %q", message, want)
+		}
 	}
 }
 
