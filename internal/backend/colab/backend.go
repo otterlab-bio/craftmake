@@ -3,6 +3,7 @@ package colab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,7 +122,14 @@ func (b *Backend) BeginRun(ctx context.Context, run backend.RunContext) error {
 			mountPath = "/content/drive"
 		}
 		if err := b.MountPreflight.CheckMount(ctx, DriveMountRequest{RunID: run.RunID, SessionID: config.SessionID, AuthConfigPath: config.AuthConfigPath, MountPath: mountPath, DriveRoot: config.DriveRoot}); err != nil {
-			return &MountNotAuthorizedError{SessionID: config.SessionID, AuthConfigPath: config.AuthConfigPath, MountPath: mountPath, DriveRoot: config.DriveRoot, Err: err}
+			// Only a missing Drive consent is a mount-authorization problem; a
+			// credential/control-plane failure must surface as itself instead of
+			// being reported as "Drive is not authorized".
+			var required *DriveAuthorizationRequiredError
+			if errors.As(err, &required) {
+				return &MountNotAuthorizedError{SessionID: config.SessionID, AuthConfigPath: config.AuthConfigPath, MountPath: mountPath, DriveRoot: config.DriveRoot, Err: err}
+			}
+			return fmt.Errorf("Colab drive mount preflight failed: %w", err)
 		}
 	}
 	// Sync the local project into the durable Drive workspace once at run start.

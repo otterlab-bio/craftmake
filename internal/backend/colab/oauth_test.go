@@ -92,3 +92,42 @@ func TestTokenManagerRefreshesOnceThenCaches(t *testing.T) {
 		t.Fatalf("expected refresh after reset: third=%q count=%d", third, count)
 	}
 }
+
+// TestTokenEndpointErrorsCarryActionableHints pins the messages a live
+// authentication failure produced: a bare HTTP 401 was impossible to act on,
+// and the two OAuth error codes have different remedies.
+func TestTokenEndpointErrorsCarryActionableHints(t *testing.T) {
+	newServer := func(status int, body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+	}
+
+	clientServer := newServer(http.StatusUnauthorized, `{"error":"invalid_client","error_description":"The provided client secret is invalid."}`)
+	defer clientServer.Close()
+	manager := &TokenManager{Config: TokenConfig{ClientID: "id", ClientSecret: "secret", TokenURL: clientServer.URL}}
+	manager.SetRefreshToken("refresh-token")
+	if _, err := manager.AccessToken(context.Background()); err == nil {
+		t.Fatal("expected the token request to fail")
+	} else if !strings.Contains(err.Error(), "invalid_client") || !strings.Contains(err.Error(), "CRAFTMAKE_COLAB_CLIENT_ID") {
+		t.Fatalf("invalid_client should explain the client configuration: %v", err)
+	}
+
+	for _, tc := range []struct{ name, body string }{
+		{"invalid_grant", `{"error":"invalid_grant","error_description":"Bad Request"}`},
+		{"unauthorized_client", `{"error":"unauthorized_client","error_description":"Unauthorized"}`},
+	} {
+		grantServer := newServer(http.StatusBadRequest, tc.body)
+		manager = &TokenManager{Config: TokenConfig{ClientID: "id", ClientSecret: "secret", TokenURL: grantServer.URL}}
+		manager.SetRefreshToken("refresh-token")
+		_, err := manager.AccessToken(context.Background())
+		grantServer.Close()
+		if err == nil {
+			t.Fatalf("%s: expected the token request to fail", tc.name)
+		}
+		if !strings.Contains(err.Error(), "auth login") {
+			t.Fatalf("%s should suggest a fresh login: %v", tc.name, err)
+		}
+	}
+}

@@ -140,6 +140,21 @@ func RefreshAccessToken(ctx context.Context, config TokenConfig, refreshToken st
 	return postToken(ctx, config, form)
 }
 
+// tokenErrorHint turns OAuth token-endpoint failures into actionable advice.
+// A refresh token is bound to the OAuth client that minted it, so the most
+// common cause of a 4xx here is a client switch rather than an expired token.
+func tokenErrorHint(body []byte) string {
+	text := string(body)
+	switch {
+	case strings.Contains(text, "invalid_grant"), strings.Contains(text, "unauthorized_client"):
+		return " (the refresh token was revoked, expired, or was issued by a different OAuth client - Google binds tokens to the client that minted them; run `craftmake colab auth login` again for this session)"
+	case strings.Contains(text, "invalid_client"):
+		return " (the configured OAuth client id/secret were rejected; unset CRAFTMAKE_COLAB_CLIENT_ID/CRAFTMAKE_COLAB_CLIENT_SECRET to use the bundled client, or check your own credentials)"
+	default:
+		return ""
+	}
+}
+
 func postToken(ctx context.Context, config TokenConfig, form url.Values) (TokenResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.TokenURL, bytes.NewBufferString(form.Encode()))
 	if err != nil {
@@ -153,7 +168,7 @@ func postToken(ctx context.Context, config TokenConfig, form url.Values) (TokenR
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return TokenResponse{}, &RemoteError{Kind: ErrorAuthRequired, Operation: "OAuth token request", StatusCode: response.StatusCode, Err: fmt.Errorf("token endpoint HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(b)))}
+		return TokenResponse{}, &RemoteError{Kind: ErrorAuthRequired, Operation: "OAuth token request", StatusCode: response.StatusCode, Err: fmt.Errorf("token endpoint HTTP %d: %s%s", response.StatusCode, strings.TrimSpace(string(b)), tokenErrorHint(b))}
 	}
 	var token TokenResponse
 	if err := json.NewDecoder(response.Body).Decode(&token); err != nil {

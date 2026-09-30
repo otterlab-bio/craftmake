@@ -168,6 +168,12 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 		if credentialErr != nil {
 			return nil, credentialErr
 		}
+		// Google binds a refresh token to the OAuth client that minted it, so a
+		// stored token cannot be redeemed after switching clients. Fail with an
+		// actionable message instead of a bare HTTP 401.
+		if auth.OAuthClientID != "" && auth.OAuthClientID != clientID {
+			return nil, fmt.Errorf("session %q was authorized with OAuth client %s, but the configured client is %s; refresh tokens cannot be moved between clients, so run `craftmake colab auth login --session %s` again (or set CRAFTMAKE_COLAB_CLIENT_ID to the original client)", config.SessionID, auth.OAuthClientID, clientID, config.SessionID)
+		}
 		manager := &colabpkg.TokenManager{Config: colabpkg.TokenConfig{ClientID: clientID, ClientSecret: clientSecret, TokenURL: os.Getenv("CRAFTMAKE_COLAB_TOKEN_URL")}}
 		manager.SetRefreshToken(refreshToken)
 		getAccessToken = func() (string, error) { return manager.AccessToken(context.Background()) }

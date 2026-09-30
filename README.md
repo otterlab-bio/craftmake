@@ -201,6 +201,7 @@ craftmake colab auth login --session gpu
   ```
 
   Precedence is flag > environment > bundled client.
+- **Google binds a refresh token to the client that minted it.** If you switch clients (for example after this default was introduced, or when moving to your own client), the stored token can no longer be redeemed and the run fails with `invalid_grant`/`unauthorized_client` plus a hint — run `craftmake colab auth login --session <name>` again to mint a token for the new client. Sessions record the client id they were authorized with (`oauth_client_id` in `colab-auth.json`) so the mismatch is reported up front.
 - Automatically stores the refresh token in `~/.config/craftmake/credentials/<session>.json` (`0600`).
 - **Login once, run indefinitely**: Subsequent runs transparently refresh access tokens in under 0.5s without browser prompts.
 

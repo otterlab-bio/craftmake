@@ -20,7 +20,7 @@ func TestBeginRunMountNotAuthorizedReturnsHint(t *testing.T) {
 		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu"},
 		Control:        &fakeControlPlane{},
 		Executor:       fakeNotebookExecutor{},
-		MountPreflight: fakeMountPreflightResult{err: errors.New("mount denied")},
+		MountPreflight: fakeMountPreflightResult{err: &DriveAuthorizationRequiredError{SessionID: "gpu", RedirectURI: "https://colab.research.google.com/consent"}},
 	}
 	err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1", ProjectDirectory: "/local/project"})
 	if err == nil {
@@ -35,6 +35,34 @@ func TestBeginRunMountNotAuthorizedReturnsHint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "craftmake colab drive mount --session gpu --authorize") {
 		t.Fatalf("error missing the real authorization command: %v", err)
+	}
+}
+
+// TestBeginRunPreflightFailureIsNotReportedAsDriveAuthorization pins the fix
+// found by a live run: a credential or control-plane failure during the
+// preflight must not be reported as "Drive is not authorized", which sends the
+// user chasing the wrong problem.
+func TestBeginRunPreflightFailureIsNotReportedAsDriveAuthorization(t *testing.T) {
+	credentialErr := errors.New(`Colab OAuth token request (auth-required): token endpoint HTTP 401`)
+	b := &Backend{
+		Config:         Config{DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive", SessionID: "gpu"},
+		Control:        &fakeControlPlane{},
+		Executor:       fakeNotebookExecutor{},
+		MountPreflight: fakeMountPreflightResult{err: credentialErr},
+	}
+	err := b.BeginRun(context.Background(), backendpkg.RunContext{RunID: "run-1", ProjectDirectory: "/local/project"})
+	if err == nil {
+		t.Fatal("expected the preflight error to surface")
+	}
+	var mountErr *MountNotAuthorizedError
+	if errors.As(err, &mountErr) {
+		t.Fatalf("a credential failure must not be classified as a Drive authorization problem: %v", err)
+	}
+	if !errors.Is(err, credentialErr) {
+		t.Fatalf("expected the underlying error to be preserved, got %v", err)
+	}
+	if strings.Contains(err.Error(), "authorize") {
+		t.Fatalf("credential failure should not suggest Drive authorization: %v", err)
 	}
 }
 

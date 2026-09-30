@@ -34,8 +34,12 @@ import (
 //
 // `make build COLAB_CLIENT_ID=... COLAB_CLIENT_SECRET=...` wires the last form.
 var (
+	// NOTE: the client secret published on the repository's main branch is one
+	// character short of the real value and fails with "invalid_client"; the
+	// released wheel (google-colab-cli 0.7.4, colab_cli/oauth_config.json)
+	// carries the working 24-character secret used here.
 	defaultColabClientID     = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
-	defaultColabClientSecret = "d-FL95Q19q7MQFpd7hHD0Ty"
+	defaultColabClientSecret = "d-FL95Q19q7MQmFpd7hHD0Ty"
 )
 
 // resolveColabOAuthCredentials resolves the OAuth client for the loopback login
@@ -128,7 +132,7 @@ func newColabAuthLoginCommand() *cobra.Command {
 		if err := writeCredentialFile(credentialFile, token.RefreshToken); err != nil {
 			return internalFailureError(err)
 		}
-		auth := colab.SessionAuth{SessionID: sessionID, DriveRoot: driveRoot, MountPath: mountPath, ColabCredentialFile: credentialFile, DriveCredentialFile: credentialFile}
+		auth := colab.SessionAuth{SessionID: sessionID, DriveRoot: driveRoot, MountPath: mountPath, ColabCredentialFile: credentialFile, DriveCredentialFile: credentialFile, OAuthClientID: clientID}
 		if err := colab.UpsertSessionAuth(path, auth); err != nil {
 			return configurationError(err)
 		}

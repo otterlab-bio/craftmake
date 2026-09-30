@@ -64,6 +64,10 @@ craftmake colab auth login --session gpu
 - Override the client with `CRAFTMAKE_COLAB_CLIENT_ID`/`CRAFTMAKE_COLAB_CLIENT_SECRET`,
   the `--client-id`/`--client-secret` flags, or
   `make build COLAB_CLIENT_ID=... COLAB_CLIENT_SECRET=...` (flag > env > bundled).
+- Google binds a refresh token to the client that minted it: after switching
+  clients, re-run `colab auth login` (the failure is reported as
+  `invalid_grant`/`unauthorized_client` with that hint, and `oauth_client_id` in
+  `colab-auth.json` records which client the session was authorized with).
 - **No re-authentication needed**: Subsequent task runs silently refresh access tokens JIT in <0.5s.
 
 ### 3.2 Inspect & Preflight

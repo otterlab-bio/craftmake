@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	colabpkg "github.com/otterlab-bio/craftmake/internal/backend/colab"
@@ -173,5 +174,43 @@ func TestTokenManagerRefreshCarriesClientID(t *testing.T) {
 	}
 	if gotClientID == "" {
 		t.Fatalf("client_id should be configured: %q", gotClientID)
+	}
+}
+
+// TestBuildColabBackendRejectsClientSwitchGuard covers the failure seen in a
+// live run: the stored refresh token was minted by a different OAuth client, so
+// the token endpoint answered with a bare 401 that gave no hint about the cause.
+func TestBuildColabBackendRejectsClientSwitchGuard(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAFTMAKE_COLAB_REFRESH_TOKEN", "")
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_ID", "current-client-id")
+	t.Setenv("CRAFTMAKE_COLAB_CLIENT_SECRET", "current-client-secret")
+	credFile := filepath.Join(t.TempDir(), "gpu.json")
+	if err := os.WriteFile(credFile, []byte("refresh-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	auth := colabpkg.SessionAuth{SessionID: "gpu", DriveRoot: "/content/drive/MyDrive/project", MountPath: "/content/drive",
+		ColabCredentialFile: credFile, DriveCredentialFile: credFile, OAuthClientID: "original-client-id"}
+	if err := colabpkg.UpsertSessionAuth(authPath, auth); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildColabBackend(context.Background(), colabBackendConfig{SessionID: "gpu", AuthConfig: authPath, ProjectDirectory: "/local/project"})
+	if err == nil {
+		t.Fatal("expected a client-switch error")
+	}
+	for _, want := range []string{"original-client-id", "current-client-id", "craftmake colab auth login --session gpu"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err.Error(), want)
+		}
+	}
+
+	// Matching the recorded client id must build normally.
+	auth.OAuthClientID = "current-client-id"
+	if err := colabpkg.UpsertSessionAuth(authPath, auth); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildColabBackend(context.Background(), colabBackendConfig{SessionID: "gpu", AuthConfig: authPath, ProjectDirectory: "/local/project"}); err != nil {
+		t.Fatalf("matching client should build: %v", err)
 	}
 }

@@ -23,6 +23,11 @@ type SessionAuth struct {
 	DriveRefreshTokenEnv string `json:"drive_refresh_token_env,omitempty"`
 	DriveRoot            string `json:"drive_root"`
 	MountPath            string `json:"mount_path"`
+	// OAuthClientID records which OAuth client minted the stored refresh token.
+	// Google binds refresh tokens to their issuing client, so switching clients
+	// requires a fresh login. Empty for sessions created before this was
+	// recorded (or for credentials supplied out of band).
+	OAuthClientID string `json:"oauth_client_id,omitempty"`
 }
 
 func LoadAuthFile(path string) (AuthFile, error) {
