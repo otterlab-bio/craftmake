@@ -332,8 +332,9 @@ func (e *JupyterWebSocketExecutor) sendExecuteRequest(conn *minimalWSConn, sessi
 
 // ioDrainWindow is how long the reader keeps draining iopub messages after the
 // execute_reply for a cell. Shell (execute_reply) and iopub (stream/error/idle)
-// are independent channels, so the reply can arrive before the output.
-const ioDrainWindow = 3 * time.Second
+// are independent channels, so the reply can arrive before the output. It is a
+// variable so tests do not have to wait for it.
+var ioDrainWindow = 3 * time.Second
 
 // drainUntilReply reads iopub/shell messages until the execution of the cell is
 // finished. A real kernel may deliver execute_reply before the iopub output, so
@@ -342,6 +343,10 @@ const ioDrainWindow = 3 * time.Second
 // stream/display_data/error output. Inbound signatures are verified when
 // HMACKey is configured.
 func (e *JupyterWebSocketExecutor) drainUntilReply(ctx context.Context, conn *minimalWSConn, session, msgID string) (string, error) {
+	// The drain deadline is only armed after the reply; clear it on every exit
+	// path so a cell whose idle status never arrives cannot leave a deadline in
+	// the past and make the next cell fail instantly.
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	var output strings.Builder
 	replied := false
 	var drainDeadline time.Time
@@ -398,7 +403,6 @@ func (e *JupyterWebSocketExecutor) drainUntilReply(ctx context.Context, conn *mi
 			// iopub idle marks the end of all output for this execution.
 			if content, ok := msg.Content.(map[string]any); ok {
 				if state, _ := content["execution_state"].(string); state == "idle" && replied {
-					_ = conn.SetReadDeadline(time.Time{})
 					return output.String(), nil
 				}
 			}
@@ -520,7 +524,19 @@ func (e *JupyterWebSocketExecutor) waitForKernelReady(ctx context.Context, proxy
 				State          string `json:"state"`
 			}
 			if jsonErr := json.NewDecoder(resp.Body).Decode(&kernel); jsonErr == nil {
-				ready = kernel.ExecutionState == "idle" || kernel.State == "idle"
+				state := kernel.ExecutionState
+				if state == "" {
+					state = kernel.State
+				}
+				switch state {
+				case "":
+					// The proxy answers 200 without a recognizable state; do not
+					// burn the budget guessing, just proceed.
+					resp.Body.Close()
+					return
+				case "idle":
+					ready = true
+				}
 			}
 		} else {
 			// Any other status means this proxy does not expose kernel state in

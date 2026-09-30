@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	backendpkg "github.com/otterlab-bio/craftmake/internal/backend"
 	"github.com/otterlab-bio/craftmake/pkg/protocol"
@@ -166,4 +168,76 @@ func archiveWithMembers(t *testing.T, members map[string]string) []byte {
 		t.Fatal(err)
 	}
 	return buffer.Bytes()
+}
+
+// flakyUploadTransport fails the first N uploads with a kernel-disconnected
+// error, mirroring a freshly assigned runtime whose kernel is not answering yet.
+type flakyUploadTransport struct {
+	failures  int
+	attempts  int
+	lastError error
+}
+
+func (f *flakyUploadTransport) ExecuteNotebook(context.Context, Runtime, []byte) (string, error) {
+	return "", nil
+}
+
+func (f *flakyUploadTransport) UploadWorkspace(context.Context, Runtime, []byte) error {
+	f.attempts++
+	if f.attempts <= f.failures {
+		return f.lastError
+	}
+	return nil
+}
+
+func (f *flakyUploadTransport) DownloadWorkspace(context.Context, Runtime, string, []string) ([]byte, error) {
+	return nil, nil
+}
+
+// TestUploadWorkspaceRetriesTransientKernelFailure pins the fix for the live
+// failure where the workspace upload timed out because it was issued before the
+// kernel answered; the upload is idempotent, so a bounded retry is safe.
+func TestUploadWorkspaceRetriesTransientKernelFailure(t *testing.T) {
+	original := workspaceRetryBackoff
+	workspaceRetryBackoff = time.Millisecond
+	defer func() { workspaceRetryBackoff = original }()
+
+	transport := &flakyUploadTransport{failures: 2, lastError: &RemoteError{Kind: ErrorKernelDisconnected, Operation: "read kernel message", Err: errors.New("i/o timeout")}}
+	if err := uploadWorkspaceWithRetry(context.Background(), transport, Runtime{ID: "runtime-1"}, []byte("archive")); err != nil {
+		t.Fatalf("transient failures should be retried: %v", err)
+	}
+	if transport.attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", transport.attempts)
+	}
+}
+
+// TestUploadWorkspaceDoesNotRetryPermanentFailures keeps a protocol or
+// configuration error from being repeated three times.
+func TestUploadWorkspaceDoesNotRetryPermanentFailures(t *testing.T) {
+	original := workspaceRetryBackoff
+	workspaceRetryBackoff = time.Millisecond
+	defer func() { workspaceRetryBackoff = original }()
+
+	transport := &flakyUploadTransport{failures: 3, lastError: &RemoteError{Kind: ErrorProtocolMismatch, Operation: "upload workspace", Err: errors.New("unknown member")}}
+	if err := uploadWorkspaceWithRetry(context.Background(), transport, Runtime{ID: "runtime-1"}, []byte("archive")); err == nil {
+		t.Fatal("expected the permanent failure to surface")
+	}
+	if transport.attempts != 1 {
+		t.Fatalf("permanent failures must not be retried, got %d attempts", transport.attempts)
+	}
+}
+
+// TestUploadWorkspaceGivesUpAfterAttempts bounds the retry.
+func TestUploadWorkspaceGivesUpAfterAttempts(t *testing.T) {
+	original := workspaceRetryBackoff
+	workspaceRetryBackoff = time.Millisecond
+	defer func() { workspaceRetryBackoff = original }()
+
+	transport := &flakyUploadTransport{failures: 10, lastError: &RemoteError{Kind: ErrorKernelDisconnected, Operation: "read kernel message", Err: errors.New("i/o timeout")}}
+	if err := uploadWorkspaceWithRetry(context.Background(), transport, Runtime{ID: "runtime-1"}, []byte("archive")); err == nil {
+		t.Fatal("expected the upload to fail after exhausting attempts")
+	}
+	if transport.attempts != workspaceUploadAttempts {
+		t.Fatalf("expected %d attempts, got %d", workspaceUploadAttempts, transport.attempts)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/otterlab-bio/craftmake/internal/backend"
 	"github.com/otterlab-bio/craftmake/pkg/protocol"
@@ -252,6 +253,14 @@ func (b *Backend) RunSubmission(ctx context.Context, submissionID string, reques
 	return result, nil
 }
 
+// workspaceUploadAttempts bounds the retry of the idempotent workspace upload.
+// A freshly assigned runtime can accept a WebSocket connection before its kernel
+// answers, which shows up as a read timeout that succeeds on a later attempt.
+const workspaceUploadAttempts = 3
+
+// workspaceRetryBackoff is a variable so tests can avoid sleeping.
+var workspaceRetryBackoff = 5 * time.Second
+
 // syncWorkspaceIn uploads the local workspace to the runtime kernel exactly once
 // per run; later submissions reuse the already-synced remote workspace.
 func (b *Backend) syncWorkspaceIn(ctx context.Context, runtime Runtime) error {
@@ -269,11 +278,37 @@ func (b *Backend) syncWorkspaceIn(ctx context.Context, runtime Runtime) error {
 	if err != nil {
 		return err
 	}
-	if err := transport.UploadWorkspace(ctx, runtime, archive); err != nil {
+	if err := uploadWorkspaceWithRetry(ctx, transport, runtime, archive); err != nil {
 		return err
 	}
 	b.syncInDone = true
 	return nil
+}
+
+// uploadWorkspaceWithRetry retries the upload while the failure looks like a
+// kernel that is not answering yet. The operation overwrites files, so repeating
+// it is safe.
+func uploadWorkspaceWithRetry(ctx context.Context, transport WorkspaceTransport, runtime Runtime, archive []byte) error {
+	var lastErr error
+	for attempt := 1; attempt <= workspaceUploadAttempts; attempt++ {
+		lastErr = transport.UploadWorkspace(ctx, runtime, archive)
+		if lastErr == nil {
+			return nil
+		}
+		var remote *RemoteError
+		if !errors.As(lastErr, &remote) || remote.Kind != ErrorKernelDisconnected {
+			return lastErr
+		}
+		if attempt == workspaceUploadAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * workspaceRetryBackoff):
+		}
+	}
+	return lastErr
 }
 
 // syncWorkspaceOut downloads the remote workspace and merges it into the local

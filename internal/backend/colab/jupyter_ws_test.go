@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -267,5 +268,60 @@ func TestJupyterResolveKernelAndFormatChannels(t *testing.T) {
 	}
 	if kid2 != "kernel-created" {
 		t.Fatalf("resolveKernel created = %q, want %q", kid2, "kernel-created")
+	}
+}
+
+// TestJupyterMissingIdleDoesNotPoisonNextCell reproduces the live failure where
+// a cell whose iopub idle status never arrived left the drain deadline in the
+// past, so the *next* cell on the same connection failed instantly with an i/o
+// timeout even though the kernel was healthy.
+func TestJupyterMissingIdleDoesNotPoisonNextCell(t *testing.T) {
+	original := ioDrainWindow
+	ioDrainWindow = 50 * time.Millisecond
+	defer func() { ioDrainWindow = original }()
+
+	clientConn, kernel := net.Pipe()
+	defer clientConn.Close()
+	defer kernel.Close()
+	client := &minimalWSConn{conn: clientConn, reader: bufio.NewReader(clientConn)}
+	kernelEnd := &minimalWSConn{conn: kernel, reader: bufio.NewReader(kernel)}
+	go func() {
+		send := func(msgType, channel string, content map[string]any) {
+			msg := jupyterMsg{Header: jupyterHeader{MsgID: uuid.NewString(), Session: "s", Username: "u", Date: "t", MsgType: msgType, Version: "5.3"}, Metadata: map[string]any{}, Content: content, Channel: channel}
+			data, _ := json.Marshal(msg)
+			_ = kernelEnd.sendServerText(data)
+		}
+		// Cell 1: reply without the idle status (as the real proxy can do).
+		_, _ = kernelEnd.ReadText()
+		send("stream", "iopub", map[string]any{"text": "cell-1\n"})
+		send("execute_reply", "shell", map[string]any{"status": "ok"})
+		// Cell 2: a healthy cell on the same connection.
+		_, _ = kernelEnd.ReadText()
+		send("stream", "iopub", map[string]any{"text": "cell-2\n"})
+		send("execute_reply", "shell", map[string]any{"status": "ok"})
+		send("status", "iopub", map[string]any{"execution_state": "idle"})
+	}()
+	executor := &JupyterWebSocketExecutor{SessionID: "sess"}
+	firstID, err := executor.sendExecuteRequest(client, "sess", "print('1')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := executor.drainUntilReply(context.Background(), client, "sess", firstID)
+	if err != nil {
+		t.Fatalf("cell 1: %v", err)
+	}
+	if !strings.Contains(first, "cell-1") {
+		t.Fatalf("cell 1 output missing: %q", first)
+	}
+	secondID, err := executor.sendExecuteRequest(client, "sess", "print('2')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := executor.drainUntilReply(context.Background(), client, "sess", secondID)
+	if err != nil {
+		t.Fatalf("cell 2 must not fail because the previous cell never reported idle: %v", err)
+	}
+	if !strings.Contains(second, "cell-2") {
+		t.Fatalf("cell 2 output missing: %q", second)
 	}
 }
