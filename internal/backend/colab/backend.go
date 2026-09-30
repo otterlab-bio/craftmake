@@ -205,11 +205,10 @@ func (b *Backend) RunSubmission(ctx context.Context, submissionID string, reques
 		// 2b. Refresh the remote workspace from the local project once per run.
 		if b.Config.SyncIn {
 			if err := b.syncWorkspaceIn(ctx, runtime); err != nil {
-				taskErr := RedactError(b.Redactor, err)
-				result.Tasks[manifest.TaskID] = backend.TaskOutcome{Err: taskErr}
-				if releaseErr := b.Control.ReleaseRuntime(ctx, runtime); releaseErr != nil {
-					_ = releaseErr
-				}
+				result.Tasks[manifest.TaskID] = backend.TaskOutcome{Err: RedactError(b.Redactor, err)}
+				// Release the instance before reporting the failure; EndRun also
+				// sweeps residual assignments.
+				_ = b.Control.ReleaseRuntime(ctx, runtime)
 				continue
 			}
 		}
