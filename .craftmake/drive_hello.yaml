@@ -1,35 +1,42 @@
 schema_version: craftmake.action/v1
 name: drive_hello
 backend: colab
+colab:
+  session: gpu
+  drive_root: /content/drive/MyDrive/craftmake
 jobs:
   drive_test:
     steps:
       - run: |
           python3 - << 'EOF'
           import os
+          import sys
           from pathlib import Path
-          print('=== Google Drive Status ===')
-          is_mounted = os.path.ismount('/content/drive')
-          print('is_mounted:', is_mounted)
-          # The runtime bootstrap mounts Drive when drive_root is configured;
-          # only fall back to an explicit mount, and never let it abort the step.
-          if not is_mounted:
-              try:
-                  from google.colab import drive
-                  drive.mount('/content/drive', force_remount=False)
-              except Exception as exc:
-                  print('Notice: Drive is not mounted:', exc)
-          drive_base = Path('/content/drive/MyDrive')
-          if not drive_base.exists():
-              drive_base = Path('/content/drive/My Drive')
-          craftmake_dir = drive_base / 'craftmake'
-          craftmake_dir.mkdir(parents=True, exist_ok=True)
-          hello_file = craftmake_dir / 'helloworld.txt'
+
+          # A verified limitation: /content/drive is only a real mount when the
+          # runtime has mounted DriveFS. Over a bare kernel WebSocket
+          # google.colab.drive.mount() cannot work, and writing to that path
+          # would silently land on the ephemeral VM disk instead of Drive, so
+          # fail loudly rather than lose data.
+          if not os.path.ismount('/content/drive'):
+              print(
+                  'ERROR: /content/drive is not mounted, so anything written here would be '
+                  'lost with the ephemeral VM. Use an action with colab.sync_out to move '
+                  'results back, or run on a runtime with DriveFS mounted.',
+                  file=sys.stderr,
+              )
+              sys.exit(2)
+
+          drive_dir = Path('/content/drive/MyDrive/craftmake')
+          drive_dir.mkdir(parents=True, exist_ok=True)
+
+          hello_file = drive_dir / 'helloworld.txt'
           hello_file.write_text('helloworld from craftmake colab!')
-          print('File created successfully:', hello_file)
+          print('Created cloud file:', hello_file)
           print('File content:', hello_file.read_text().strip())
-          # The task finalizer always flushes before the instance is released;
-          # flush here too when this step must guarantee durability.
+
+          # The task finalizer flushes before the instance is released; flush here
+          # too when this step must guarantee durability.
           try:
               from google.colab import drive
               print('Flushing writes to Google Drive cloud...')

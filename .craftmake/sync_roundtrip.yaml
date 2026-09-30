@@ -1,0 +1,23 @@
+schema_version: craftmake.action/v1
+name: sync_roundtrip
+backend: colab
+colab:
+  session: gpu
+  # The remote workspace root. It does not have to live on Drive: sync_in uploads
+  # the local project into <drive_root>/work and sync_out mirrors <drive_root>
+  # back into <project>/.craftmake/colab-workspace, which works on any runtime.
+  drive_root: /content/craftmake
+  sync_in: true
+  sync_out: true
+  excludes:
+    - .craftmake/state
+jobs:
+  roundtrip:
+    steps:
+      - run: |
+          # sync_in placed the local project under the remote workspace root.
+          echo "runtime read: $(cat /content/craftmake/work/input.txt)"
+
+          mkdir -p /content/craftmake/outputs
+          echo "written-by-colab-runtime" > /content/craftmake/outputs/out.txt
+          echo "wrote outputs/out.txt on the runtime"

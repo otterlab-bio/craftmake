@@ -160,84 +160,32 @@ client or extra service is needed:
 - Payloads travel as kernel messages, so both directions are bounded by
   `CRAFTMAKE_COLAB_SYNC_MAX_BYTES` (default 32 MiB). Keep large data on Drive.
 
-### 4.4 Writing to Drive from a step
+### 4.4 Persisting results
 
-The runtime bootstrap already mounts Drive when `drive_root` is configured, so
-only fall back to an explicit mount, and keep the flush guarded:
+Use `sync_in`/`sync_out` (verified against a live runtime): the remote workspace
+root does not need to be on Drive, and outputs return to
+`<project>/.craftmake/colab-workspace/`.
+
+```yaml
+colab:
+  session: gpu
+  drive_root: /content/craftmake
+  sync_in: true
+  sync_out: true
+```
+
+A step must never assume `/content/drive` is mounted — writing there without a
+real mount silently lands on the ephemeral VM disk while the step still exits 0.
+Fail loudly instead:
 
 ```python
-import os
+import os, sys
 from pathlib import Path
 
 if not os.path.ismount('/content/drive'):
-    try:
-        from google.colab import drive
-        drive.mount('/content/drive', force_remount=False)
-    except Exception as exc:
-        print('Notice: Drive is not mounted:', exc)
-
-output_dir = Path('/content/drive/MyDrive/my_project/checkpoints')
-output_dir.mkdir(parents=True, exist_ok=True)
-(output_dir / 'model.pt').write_text('model weights')
-
-# The task finalizer always flushes FUSE writes before the instance is released.
-try:
-    from google.colab import drive
-    drive.flush_and_unmount()
-except Exception as exc:
-    print('Notice: flush skipped:', exc)
+    print('ERROR: /content/drive is not mounted; writes would be lost', file=sys.stderr)
+    sys.exit(2)
 ```
-
----
-
-## 5. Command Reference
-
-### Action Commands
-
-```bash
-# List all discovered actions under .craftmake/*.yaml
-craftmake action list
-
-# Inspect and compile action DAG without execution
-craftmake action plan <name> [--arg KEY=VALUE]
-
-# Execute action locally
-craftmake action run <name> --backend local [--arg KEY=VALUE]
-
-# Execute action on Google Colab (--colab-session is optional when the action
-# file declares colab.session)
-craftmake action run <name> --backend colab [--colab-session gpu] [--force]
-```
-
-### Session Commands
-
-```bash
-craftmake colab auth login --session gpu
-craftmake colab auth configure --config ~/.config/craftmake/colab-auth.json \
-  --session gpu --drive-root /content/drive/MyDrive/craftmake
-craftmake colab auth show --session gpu
-craftmake colab doctor --session gpu
-craftmake colab drive mount --session gpu --authorize
-```
-
-### Run Inspection & Recovery
-
-Run ids contain a random suffix, so look results up per run rather than by
-sorting run directories.
-
-```bash
-# View controller event logs
-cat .craftmake/state/runs/<run_id>/controller.jsonl
-
-# View task results and step stdout/stderr (step indexes are 1-based)
-cat .craftmake/state/runs/<run_id>/tasks/<task_id>/attempt-001/result.json
-cat .craftmake/state/runs/<run_id>/tasks/<task_id>/attempt-001/step-1.stdout
-
-# Resume interrupted run
-craftmake resume --backend colab --colab-session gpu --run <run_id>
-```
-
----
 
 ### 4.5 Limitations verified against the live service
 

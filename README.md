@@ -300,58 +300,65 @@ With `colab.session` declared, `--colab-session` is optional:
 craftmake action run hello --backend colab --force
 ```
 
-#### Drive persistence example
+#### Persistence that works today: `sync_in` / `sync_out`
+
+Until a runtime has DriveFS mounted (see the limitations below), the reliable way
+to keep results is the workspace sync, which travels through the kernel and is
+verified against a live Colab runtime:
 
 ```yaml
-# .craftmake/drive_hello.yaml
+# .craftmake/sync_roundtrip.yaml
 schema_version: craftmake.action/v1
-name: drive_hello
+name: sync_roundtrip
 backend: colab
 colab:
   session: gpu
-  drive_root: /content/drive/MyDrive/craftmake
+  # The remote workspace root does not have to live on Drive.
+  drive_root: /content/craftmake
+  sync_in: true
+  sync_out: true
+  excludes:
+    - .craftmake/state
 jobs:
-  drive_test:
+  roundtrip:
     steps:
       - run: |
-          python3 - << 'EOF'
-          import os
-          from pathlib import Path
-
-          # The runtime bootstrap mounts Drive when drive_root is configured;
-          # only fall back to an explicit mount when it is missing.
-          if not os.path.ismount('/content/drive'):
-              try:
-                  from google.colab import drive
-                  drive.mount('/content/drive', force_remount=False)
-              except Exception as exc:
-                  print('Notice: Drive is not mounted:', exc)
-
-          drive_dir = Path('/content/drive/MyDrive/craftmake')
-          drive_dir.mkdir(parents=True, exist_ok=True)
-
-          hello_file = drive_dir / 'helloworld.txt'
-          hello_file.write_text('helloworld from craftmake colab!')
-          print('Created cloud file:', hello_file)
-
-          # The task finalizer always flushes FUSE writes before the instance is
-          # released; flush here too when the step must guarantee durability.
-          try:
-              from google.colab import drive
-              drive.flush_and_unmount()
-              print('Flushed to cloud successfully!')
-          except Exception as exc:
-              print('Notice: flush skipped:', exc)
-          EOF
+          echo "runtime read: $(cat /content/craftmake/work/input.txt)"
+          mkdir -p /content/craftmake/outputs
+          echo "written-by-colab-runtime" > /content/craftmake/outputs/out.txt
 ```
-
-Execute the action:
 
 ```bash
-craftmake action run drive_hello --backend colab --force
+craftmake action run sync_roundtrip --backend colab --force
+# the runtime reads the uploaded project, and outputs come back to
+# <project>/.craftmake/colab-workspace/outputs/out.txt
 ```
 
-The file is written directly to your Google Drive and is immediately accessible from the web, mobile app, or subsequent workflow runs.
+#### Writing to Drive from a step
+
+A step must not assume `/content/drive` exists: writing there without a real
+mount silently lands on the ephemeral VM disk while the step still exits 0. The
+checked-in [`drive_hello.yaml`](.craftmake/drive_hello.yaml) therefore fails
+loudly when the mount is missing:
+
+```python
+import os, sys
+from pathlib import Path
+
+if not os.path.ismount('/content/drive'):
+    print('ERROR: /content/drive is not mounted, so anything written here would be lost', file=sys.stderr)
+    sys.exit(2)
+
+drive_dir = Path('/content/drive/MyDrive/craftmake')
+drive_dir.mkdir(parents=True, exist_ok=True)
+(drive_dir / 'helloworld.txt').write_text('helloworld from craftmake colab!')
+
+try:
+    from google.colab import drive
+    drive.flush_and_unmount()
+except Exception as exc:
+    print('Notice: flush skipped:', exc)
+```
 
 **Optional Drive file service.** Setting `CRAFTMAKE_COLAB_DRIVE_FILES_URL` to a service exposing the `/drive/read` and `/drive/write` endpoints additionally enables Drive-backed log materialization and `RecoverSubmission`, so logs and results can be recovered from the durable workspace without restarting a runtime.
 
