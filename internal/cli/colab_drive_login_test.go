@@ -249,3 +249,30 @@ func TestDriveTransportReachesBackendConfig(t *testing.T) {
 		t.Fatalf("normalised transport = %q, want rest", got)
 	}
 }
+
+// TestDriveMountReachesBackendConfig pins that an action can ask for the rclone
+// mount, and that the environment overrides the action file.
+func TestDriveMountReachesBackendConfig(t *testing.T) {
+	config := resolveColabBackendConfig(commonOptions{colab: &action.ColabSpec{
+		Session:    "gpu",
+		DriveMount: "rclone",
+	}}, "", "", false, t.TempDir())
+	if config.DriveMount != "rclone" {
+		t.Fatalf("action drive mount not propagated: %#v", config)
+	}
+	if got := colabpkg.NormalizeDriveMountMode(config.DriveMount); got != colabpkg.DriveMountRclone {
+		t.Fatalf("normalised mount = %q, want rclone", got)
+	}
+	// The environment wins, so a checked-in action can be overridden.
+	t.Setenv("CRAFTMAKE_COLAB_DRIVE_MOUNT", "off")
+	instance := &colabpkg.Backend{}
+	applyColabOverrides(instance, config)
+	if instance.Config.DriveMount != colabpkg.DriveMountOff {
+		t.Fatalf("environment must override the action file, got %q", instance.Config.DriveMount)
+	}
+	t.Setenv("CRAFTMAKE_COLAB_DRIVE_MOUNT", "")
+	applyColabOverrides(instance, config)
+	if instance.Config.DriveMount != colabpkg.DriveMountRclone {
+		t.Fatalf("action mount must apply without an override, got %q", instance.Config.DriveMount)
+	}
+}

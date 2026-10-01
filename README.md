@@ -291,6 +291,8 @@ colab:
 | `drive_root` / `remote_root` / `scratch_root` | Remote directories used for the durable workspace, the workspace root, and scratch space |
 | `default_accelerator` | Accelerator for jobs that do not set one (`cpu`, `gpu`, `tpu`) |
 | `sync_in` / `sync_out` | Enable the workspace sync described above |
+| `drive_mount` | How the runtime makes `/content/drive` real: `off` (default), `rclone` (works with the Drive credential), `auto` / `drivefs` (DriveFS, does not mount) |
+| `drive_transport` / `drive_folder` | Mirror the workspace into Drive through the Drive REST API |
 | `excludes` | Paths skipped by the sync (relative to the project and to the remote root) |
 | `path_map` | Host prefix → remote prefix mapping used by the sync |
 
@@ -302,9 +304,11 @@ craftmake action run hello --backend colab --force
 
 #### Persistence that works today: `sync_in` / `sync_out`
 
-Until a runtime has DriveFS mounted (see the limitations below), the reliable way
-to keep results is the workspace sync, which travels through the kernel and is
-verified against a live Colab runtime:
+The reliable way to keep results is the workspace sync, which travels through the
+kernel and is verified against a live Colab runtime. For results that must outlive
+the runtime, mirror them into Drive with
+[`colab.drive_transport: rest`](#persisting-the-workspace-to-google-drive-colabdrive_transport-rest)
+or mount Drive with [`colab.drive_mount: rclone`](#mounting-drive):
 
 ```yaml
 # .craftmake/sync_roundtrip.yaml
@@ -397,14 +401,71 @@ except Exception as exc:
 
 **Optional Drive file service.** Setting `CRAFTMAKE_COLAB_DRIVE_FILES_URL` to a service exposing the `/drive/read` and `/drive/write` endpoints additionally enables Drive-backed log materialization and `RecoverSubmission`, so logs and results can be recovered from the durable workspace without restarting a runtime.
 
-#### Mounting Drive with DriveFS
+#### Mounting Drive
 
-`craftmake colab drive login --session gpu` authorizes a **Drive-scoped**
-credential (separate from the Colab login, because the runtime client carries no
-Drive API access). When it is present, the run's bootstrap starts a local
-metadata server and the runtime's own `/opt/google/drive/drive` binary against
-it, then waits for the mount — the mechanism that works without the Colab
-frontend:
+Mounting is opt-in (`colab.drive_mount` or `CRAFTMAKE_COLAB_DRIVE_MOUNT`) and
+there are two mechanisms. **`rclone` is the one that works**; `drivefs` is the
+runtime's own binary and does not.
+
+```bash
+craftmake colab drive login --session gpu     # Drive-scoped credential (once)
+craftmake action run drive_hello --backend colab --force
+```
+
+##### `drive_mount: rclone` — a real mount, verified live
+
+```yaml
+colab:
+  session: gpu
+  drive_root: /content/drive/MyDrive/craftmake
+  drive_mount: rclone
+```
+
+DriveFS rejects a third-party credential, so the bootstrap mounts Drive with
+rclone instead, which talks to the public Drive API v3 that accepts the
+Drive-scoped credential. The bootstrap:
+
+- installs rclone when the image does not ship it
+  (`CRAFTMAKE_COLAB_RCLONE_URL`, disable with `CRAFTMAKE_COLAB_RCLONE_NO_INSTALL`);
+- provides the `fusermount3` helper rclone needs — the Colab image only ships the
+  FUSE2 `fusermount`, and exposing it under the expected name is enough (verified
+  live: the mount is ready in about a second). Installing `fuse3` remains the
+  fallback and is bounded by
+  `CRAFTMAKE_COLAB_RCLONE_INSTALL_TIMEOUT_SECONDS` (default 240s), so a stalled
+  package manager cannot hang the run;
+- writes a `0600` rclone configuration holding the refresh token;
+- mounts **My Drive at `<mount_path>/MyDrive`** and aliases `<mount_path>/My Drive`
+  to it, so both Colab spellings keep working. rclone mounts the My Drive *root*,
+  so mounting at `<mount_path>` itself would leave `/content/drive/MyDrive/...`
+  pointing at the ephemeral disk;
+- starts the mount as a detached background process rather than with `--daemon`,
+  which rclone 1.75 rejects when its RC endpoint is enabled (`Daemon timed out …
+  daemon exited with error code 1`).
+
+A requested mount is **required**: if it does not come up (`CRAFTMAKE_COLAB_DRIVE_MOUNT_TIMEOUT_SECONDS`,
+default 90) the runtime writes a sentinel, the finalizer fails the task with exit
+code 2, and the reason is recorded in the result's `observability_errors`. That is
+deliberate — a run whose workspace is supposed to be on Drive must not report
+success for files that landed on the ephemeral VM disk.
+
+Writing through the mount is buffered, not immediate: rclone queues the upload and
+sends it afterwards. The finalizer therefore waits for that queue to drain, using
+the RC endpoint the bootstrap enabled, before unmounting — a write followed by an
+immediate unmount is lost otherwise (both behaviours were verified live). A queue
+that never drains is reported as `CRAFTMAKE_DRIVE_FLUSH_TIMEOUT` in
+`observability_errors` instead of being passed off as success.
+
+Costs and caveats: every ephemeral runtime downloads rclone and mounts before the
+first step (~10–30s), the mount is a network filesystem, and buffered writes only
+reach Drive once they drain. Keep large sequential IO outside the mount and use
+`sync_out` or `drive_transport: rest` when durability must not depend on the
+mount. Verified live: a step wrote `e2e.txt` through the mount and the content was
+read back from the account's Drive afterwards.
+
+##### `drive_mount: drivefs` — does not mount
+
+`CRAFTMAKE_COLAB_DRIVE_MOUNT` also accepts `auto` and `drivefs`, which use the
+runtime's own `/opt/google/drive/drive` binary through a local metadata shim:
 
 ```bash
 craftmake colab drive login --session gpu     # browser approval once
@@ -412,9 +473,10 @@ craftmake colab drive logout --session gpu    # forget it
 craftmake action run drive_hello --backend colab --force
 ```
 
-- `CRAFTMAKE_COLAB_DRIVE_MOUNT` selects `off` (default), `auto` (mount when a
-  credential is present) or `drivefs` (always attempt). Mounting is expected to
-  fail with a third-party client; see the limitation below.
+- `CRAFTMAKE_COLAB_DRIVE_MOUNT` selects `off` (default), `rclone`, `auto` (mount
+  when a credential is present) or `drivefs` (always attempt). Use `rclone`:
+  DriveFS is expected to fail with a third-party client; see the limitation
+  below.
 - The default Drive client is rclone's public installed-app client; override it
   with `CRAFTMAKE_COLAB_DRIVE_CLIENT_ID`/`_SECRET`, `--client-id`/`--client-secret`,
   or `make build DRIVE_CLIENT_ID=... DRIVE_CLIENT_SECRET=...`.
@@ -448,7 +510,7 @@ craftmake action run drive_hello --backend colab --force
 
 These were observed on real Colab runtimes, not in a simulator:
 
-- **`/content/drive` is not a mount by default.** `google.colab.drive.mount()` needs the Colab *frontend*; over a bare kernel WebSocket it raises (`'NoneType' object has no attribute 'kernel'`), and `os.path.ismount('/content/drive')` stays false. The DriveFS mount above is what makes the path real. Code that writes under `/content/drive/...` therefore writes to the runtime's local disk, which is destroyed with the VM — the step still exits 0, so this fails silently. Use `colab.sync_out` to move results back to the local machine, or drive the Drive REST API with the propagated credentials; do not rely on `mount_path` in the runtime's filesystem.
+- **`/content/drive` is not a mount unless you ask for one.** `google.colab.drive.mount()` needs the Colab *frontend*; over a bare kernel WebSocket it raises (`'NoneType' object has no attribute 'kernel'`), `os.path.ismount('/content/drive')` stays false, and the directory simply exists on the ephemeral disk. `drive_mount: rclone` is what makes the path real (verified live); code that writes under `/content/drive/...` without it writes to the VM's local disk, which is destroyed with the VM. The task still exits 0 in that case unless the mount was requested — which is why a requested rclone mount fails the task instead. Use `colab.sync_out`, `colab.drive_transport: rest`, or a mounted Drive; do not rely on `mount_path` alone.
 - **Drive consent is per runtime, not per account.** The `dfs_ephemeral` authorization URL carries the runtime endpoint, and a newly assigned runtime reports the credential as unauthorized again, so `colab drive mount --authorize` cannot pre-authorize a later ephemeral run — the consent has to be given while the run that needs it is waiting. With `CRAFTMAKE_COLAB_DRIVE_PREFLIGHT` left at its default the run stops early and prints that URL; the run-level consent prompt (`AuthConsentHandler`) is the path that actually completes.
 - **The first connection to a fresh runtime may be too early.** A workspace upload (`sync_in`) issued before the notebook has driven the kernel can time out waiting for the kernel to answer; `sync_out` after the notebook is reliable. `sync_in` defaults to off for this reason.
 

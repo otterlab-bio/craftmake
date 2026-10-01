@@ -14,6 +14,9 @@ const (
 	DriveMountAuto = "auto"
 	// DriveMountDriveFS always attempts the DriveFS mount.
 	DriveMountDriveFS = "drivefs"
+	// DriveMountRclone mounts Drive with rclone, which accepts the Drive-scoped
+	// credential. This is the mode that can actually make /content/drive real.
+	DriveMountRclone = "rclone"
 	// DriveMountOff never attempts a mount.
 	DriveMountOff = "off"
 )
@@ -45,6 +48,9 @@ const DriveFSBinary = "/opt/google/drive/drive"
 const (
 	driveMountUnavailableMarker = "CRAFTMAKE_DRIVE_MOUNT_UNAVAILABLE"
 	driveMountOKMarker          = "CRAFTMAKE_DRIVE_MOUNT_OK"
+	// driveFlushTimeoutMarker reports that buffered writes had not reached Drive
+	// before the mount was released.
+	driveFlushTimeoutMarker = "CRAFTMAKE_DRIVE_FLUSH_TIMEOUT"
 )
 
 // defaultDriveMountTimeoutSeconds bounds how long the runtime waits for the
@@ -52,16 +58,18 @@ const (
 const defaultDriveMountTimeoutSeconds = 90
 
 // NormalizeDriveMountMode maps operator input onto a known mode.
-// NormalizeDriveMountMode maps operator input onto a known mode.
 //
 // The default is off: a live investigation showed that DriveFS cannot be mounted
 // with a third-party OAuth client (see BuildDriveFSMountSource), so attempting it
 // on every run would only cost the mount timeout before falling back. `auto`
-// remains available for the case where a credential can satisfy DriveFS.
+// remains available for the case where a credential can satisfy DriveFS, and
+// `rclone` selects the mount that does work with it.
 func NormalizeDriveMountMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case DriveMountAuto, "if-available":
 		return DriveMountAuto
+	case DriveMountRclone, "rclone-mount", "fuse":
+		return DriveMountRclone
 	case DriveMountDriveFS, "on", "true", "1", "drivefs-only":
 		return DriveMountDriveFS
 	default:
@@ -82,9 +90,33 @@ type DriveMountCredential struct {
 
 // DriveMountSpec describes how the runtime should mount Drive.
 type DriveMountSpec struct {
+	// Kind selects the bootstrap: DriveMountKindDriveFS (default) or
+	// DriveMountKindRclone.
+	Kind DriveMountKind
+	// Credential is the Drive-scoped credential the mount refreshes from.
 	Credential  DriveMountCredential
 	MountPath   string
 	TimeoutSecs int
+	// Required makes a failed mount fail the task. It is set for mounts the
+	// operator asked for explicitly, where writing to the ephemeral disk instead
+	// of Drive would be a silent data loss.
+	Required bool
+	// Rclone carries the rclone bootstrap knobs when Kind is rclone.
+	Rclone RcloneMountOptions
+}
+
+// DriveMountKind names a mount bootstrap.
+type DriveMountKind string
+
+// BuildDriveMountSource renders the bootstrap for the spec's mount kind.
+//
+// runtimeDirectory is where the bootstrap leaves its failure sentinel; see
+// BuildRcloneMountSource.
+func BuildDriveMountSource(spec DriveMountSpec, runtimeDirectory string) string {
+	if spec.Kind == DriveMountKindRclone {
+		return BuildRcloneMountSource(spec, runtimeDirectory)
+	}
+	return BuildDriveFSMountSource(spec)
 }
 
 // BuildDriveFSMountSource renders the bootstrap code that mounts Drive inside the

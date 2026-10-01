@@ -204,30 +204,67 @@ existing files. The bundled default client is rclone's public one, whose quota i
 shared globally — for real workloads set your own
 `CRAFTMAKE_COLAB_DRIVE_CLIENT_ID`/`_SECRET`.
 
-### 4.6 Mounting Drive with DriveFS
+### 4.6 Mounting Drive (`drive_mount`)
+
+Mounting is opt-in. `rclone` is the mechanism that works; `drivefs` does not.
 
 ```bash
 craftmake colab drive login --session gpu    # Drive-scoped credential (once)
 craftmake colab drive logout --session gpu   # forget it
 ```
 
-With a Drive credential the bootstrap can attempt a mount through a local metadata
-shim plus `/opt/google/drive/drive`. **This does not work and is off by default**:
-DriveFS's sync engine requires a token from Google's own client and rejects a
-third-party one (`CANNOT_INIT_CELLOFS: PERMISSION_DENIED`, exit `rc=12`), and the
-Colab frontend is the only party that can mint a suitable token. Use `sync_out`
-for persistence, or the Drive REST API v3, which does accept the Drive-scoped
-credential.
-`CRAFTMAKE_COLAB_DRIVE_MOUNT=off|auto|drivefs` (default `off`) controls it; the
-default client is rclone's public one and can be overridden. If the runtime has no
-DriveFS or the mount fails, the run continues with a notice recorded in the
-result's `observability_errors` and `sync_out` remains the fallback.
+#### `drive_mount: rclone` — a real mount, verified live
+
+```yaml
+colab:
+  session: gpu
+  drive_root: /content/drive/MyDrive/craftmake
+  drive_mount: rclone
+```
+
+DriveFS rejects a third-party credential, so the bootstrap mounts Drive with
+rclone against the public Drive API v3 instead. It installs rclone when the image
+lacks it (browser-ish User-Agent plus a bounded curl fallback; disable with
+`CRAFTMAKE_COLAB_RCLONE_NO_INSTALL`), provides the `fusermount3` helper rclone
+needs by exposing the FUSE2 helper the image ships (instant; installing `fuse3`
+is the bounded fallback), writes a `0600` rclone configuration holding the refresh
+token, and mounts **My Drive at `<mount_path>/MyDrive`** — aliasing
+`<mount_path>/My Drive` to it. rclone mounts the My Drive *root*, so mounting at
+`<mount_path>` itself would leave `/content/drive/MyDrive/...` on the ephemeral
+disk.
+
+A requested mount is **required**: if it does not come up
+(`CRAFTMAKE_COLAB_DRIVE_MOUNT_TIMEOUT_SECONDS`, default 90) the runtime writes a
+sentinel and the finalizer fails the task with exit code 2, recording the reason
+in `observability_errors`. This is deliberate — a run whose workspace belongs on
+Drive must not report success for writes that landed on the ephemeral disk.
+
+Writes are buffered: rclone queues the upload and sends it afterwards, so the
+finalizer waits for that queue to drain (through the RC endpoint the bootstrap
+enables) before unmounting. A write followed by an immediate unmount is lost
+otherwise, and a queue that never drains is reported as
+`CRAFTMAKE_DRIVE_FLUSH_TIMEOUT`. Verified live: a step wrote through the mount and
+the content was read back from the account's Drive. Budget ~10–30s per ephemeral
+runtime for the install and mount.
+
+#### `drive_mount: drivefs` — does not mount
+
+`CRAFTMAKE_COLAB_DRIVE_MOUNT=off|rclone|auto|drivefs` (default `off`) also accepts
+`auto`/`drivefs`, which use a local metadata shim plus
+`/opt/google/drive/drive`. **DriveFS does not work with a third-party client**:
+its sync engine requires a token from Google's own client and rejects ours
+(`CANNOT_INIT_CELLOFS: PERMISSION_DENIED`, exit `rc=12`), and only the Colab
+frontend can mint a suitable token. DriveFS failures stay non-fatal: the run
+continues with a notice in the result's `observability_errors` and `sync_out`
+remains the fallback. Use `rclone`, `sync_out`, or the Drive REST API.
 
 ### 4.7 Limitations verified against the live service
 
-- **`/content/drive` is not a mount unless DriveFS mounting succeeded.** Without
-  it, writes under that path land on the ephemeral VM disk while the step still
-  exits 0; use the DriveFS mount above, `sync_out`, or the Drive REST API.
+- **`/content/drive` is not a mount unless you ask for one.** Without
+  `drive_mount: rclone`, writes under that path land on the ephemeral VM disk
+  while the step still exits 0 — unless the mount was requested, in which case the
+  task fails (exit 2) instead of faking success; use `drive_mount: rclone`,
+  `sync_out`, or the Drive REST API.
 - **Drive consent is per runtime, not per account.** A newly assigned runtime
   reports the Drive credential as unauthorized again, so `colab drive mount
   --authorize` cannot pre-authorize a later ephemeral run; consent must be given

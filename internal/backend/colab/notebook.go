@@ -83,17 +83,19 @@ func BuildNotebookRedactedWithOptions(manifest *protocol.TaskManifest, mapping R
 // driveMountSource returns the bootstrap code that makes /content/drive usable,
 // or an empty string when the workspace is not on Drive.
 //
-// With a Drive credential the runtime mounts Drive itself with DriveFS, which is
-// the only mechanism that works over a bare kernel WebSocket. Without one it
-// falls back to the historical best-effort google.colab.drive.mount(), which
-// requires the Colab frontend and therefore only succeeds in a real notebook.
+// With a Drive credential the runtime mounts Drive itself: rclone when the
+// operator selected it, otherwise DriveFS. Neither needs the Colab frontend,
+// which is what makes them work over a bare kernel WebSocket. Without a
+// credential it falls back to the historical best-effort
+// google.colab.drive.mount(), which requires the frontend and therefore only
+// succeeds in a real notebook.
 func driveMountSource(mapping RemoteTaskMapping, options NotebookOptions) string {
 	onDrive := strings.HasPrefix(mapping.WorkDirectory, "/content/drive") || strings.HasPrefix(mapping.ResultPath, "/content/drive")
 	if !onDrive {
 		return ""
 	}
 	if options.DriveMount != nil {
-		return strings.TrimRight(BuildDriveFSMountSource(*options.DriveMount), "\n")
+		return strings.TrimRight(BuildDriveMountSource(*options.DriveMount, mapping.RuntimeDirectory), "\n")
 	}
 	return `if not os.path.ismount('/content/drive'):
     try:
@@ -168,12 +170,16 @@ func finalizerSource(manifest *protocol.TaskManifest, mapping RemoteTaskMapping)
 		indices = append(indices, strconv.Itoa(step.Index))
 	}
 	return fmt.Sprintf(`import json
+import os
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 runtime_dir = Path(%s)
 result_path = Path(%s)
 step_indices = [%s]
+mount_sentinel = runtime_dir / %s
 
 
 def _timestamp(name):
@@ -206,6 +212,15 @@ for i in step_indices:
         "stderr_path": str(runtime_dir / f"step-{i}.stderr"),
     })
 
+# An explicitly requested Drive mount that did not happen means the workspace
+# was written to the ephemeral VM disk. Fail the task instead of reporting
+# success for results that were never persisted.
+if mount_sentinel.exists():
+    mount_reason = mount_sentinel.read_text().strip() or "the Drive mount was requested but did not succeed"
+    if overall_exit == 0:
+        overall_exit = 2
+    print("CRAFTMAKE_DRIVE_MOUNT_REQUIRED_FAILED " + mount_reason)
+
 payload = {
     "protocol_version": %d,
     "run_id": %s,
@@ -215,6 +230,7 @@ payload = {
     "exit_code": overall_exit,
     "steps": steps,
 }
+
 for i in step_indices:
     stdout_file = runtime_dir / f"step-{i}.stdout"
     if stdout_file.exists():
@@ -233,10 +249,56 @@ try:
     drive.flush_and_unmount()
 except Exception:
     pass
+# google.colab's helper only knows DriveFS, so release an rclone mount here.
+# rclone buffers writes and uploads them afterwards, so its pending uploads must
+# drain before the mount is released: unmounting straight away loses the queued
+# writes (verified live). The RC endpoint started with the mount reports the
+# queue; the wait is bounded, and a queue that cannot be observed counts as
+# pending rather than as drained, so the failure is never silent.
+def _pending_uploads(_stats):
+    _cache = _stats.get("diskCache") or {}
+    _pending = 0
+    _observed = False
+    for _key, _value in _cache.items():
+        _name = str(_key).lower()
+        if ("upload" in _name or "queue" in _name) and isinstance(_value, (int, float)):
+            _pending += int(_value)
+            _observed = True
+    return _pending, _observed
+
+
+def _flush_rclone_mount():
+    _clean = 0
+    for _ in range(90):
+        try:
+            _stats = subprocess.run(["rclone", "rc", "--rc-addr", "127.0.0.1:5572", "vfs/stats"],
+                                    capture_output=True, text=True, timeout=15)
+            _pending, _observed = _pending_uploads(json.loads(_stats.stdout or "{}"))
+            # Two consecutive clean readings, so a write about to be queued is
+            # not mistaken for a drained queue.
+            _clean = _clean + 1 if (_observed and _pending == 0) else 0
+            if _clean >= 2:
+                return True
+        except Exception:
+            _clean = 0
+        time.sleep(1)
+    return False
+
+
+try:
+    for _mount_point in ("/content/drive/MyDrive", "/content/drive"):
+        if os.path.ismount(_mount_point):
+            if _flush_rclone_mount():
+                print("CRAFTMAKE_DRIVE_FLUSH drained pending Drive uploads")
+            else:
+                print("CRAFTMAKE_DRIVE_FLUSH_TIMEOUT pending Drive uploads did not drain before the mount was released; writes made just before the end of the run may not have reached Drive")
+            subprocess.run(["umount", _mount_point], capture_output=True)
+except Exception:
+    pass
 print("CRAFTMAKE_TASK_RESULT_BEGIN")
 print(json.dumps(payload, sort_keys=True))
 print("CRAFTMAKE_TASK_RESULT_END")
-`, pythonString(mapping.RuntimeDirectory), pythonString(mapping.ResultPath), strings.Join(indices, ", "), protocol.Version, pythonString(manifest.RunID), pythonString(manifest.TaskID), manifest.Attempt)
+`, pythonString(mapping.RuntimeDirectory), pythonString(mapping.ResultPath), strings.Join(indices, ", "), pythonString(rcloneMountMissingSentinel), protocol.Version, pythonString(manifest.RunID), pythonString(manifest.TaskID), manifest.Attempt)
 }
 
 func pythonString(value string) string { encoded, _ := json.Marshal(value); return string(encoded) }

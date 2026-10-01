@@ -48,10 +48,11 @@ type colabBackendConfig struct {
 	SyncOut            bool
 	Excludes           []string
 	PathMap            map[string]string
+	DriveMount         string
 	DriveTransport     string
 	DriveFolder        string
 
-	// DriveCredential backs the DriveFS mount when the session has a Drive
+	// DriveCredential backs the Drive mount when the session has a Drive
 	// credential configured.
 	DriveCredential *colabpkg.DriveMountCredential
 	// DriveStore backs the Drive REST transport.
@@ -79,6 +80,9 @@ func resolveColabBackendConfig(options commonOptions, sessionFlag, authConfigFla
 	config.ScratchRoot = spec.ScratchRoot
 	config.DefaultAccelerator = spec.DefaultAccelerator
 	config.SyncIn = spec.SyncIn
+	if spec.DriveMount != "" {
+		config.DriveMount = spec.DriveMount
+	}
 	if spec.DriveTransport != "" {
 		config.DriveTransport = spec.DriveTransport
 	}
@@ -114,7 +118,14 @@ func applyColabOverrides(backendInstance *colabpkg.Backend, config colabBackendC
 	backendInstance.Config.SyncOut = config.SyncOut
 	backendInstance.Config.PathMap = config.PathMap
 	backendInstance.Config.DrivePreflight = colabpkg.NormalizeDrivePreflightMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_PREFLIGHT"))
-	backendInstance.Config.DriveMount = colabpkg.NormalizeDriveMountMode(os.Getenv("CRAFTMAKE_COLAB_DRIVE_MOUNT"))
+	// An explicitly requested mount mode (action file or environment) decides the
+	// bootstrap; the environment wins so an operator can override a checked-in
+	// action without editing it.
+	mountMode := config.DriveMount
+	if envMount := os.Getenv("CRAFTMAKE_COLAB_DRIVE_MOUNT"); envMount != "" {
+		mountMode = envMount
+	}
+	backendInstance.Config.DriveMount = colabpkg.NormalizeDriveMountMode(mountMode)
 	backendInstance.Config.DriveCredential = config.DriveCredential
 	transport := config.DriveTransport
 	if envTransport := os.Getenv("CRAFTMAKE_COLAB_DRIVE_TRANSPORT"); envTransport != "" {

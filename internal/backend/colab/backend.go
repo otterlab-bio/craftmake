@@ -601,10 +601,13 @@ func extractStepLog(output, header string) string {
 
 // notebookOptions decides whether the generated notebook should mount Drive.
 // Mounting is attempted only when a Drive credential is configured and the mode
-// is not off; the generated code degrades gracefully when the runtime has no
-// DriveFS binary.
+// is not off. The rclone mount is the mode that works with a third-party
+// credential and is marked required, so a failure fails the task instead of
+// letting the workspace land on the ephemeral disk; the DriveFS mount degrades
+// gracefully, as documented.
 func (b *Backend) notebookOptions() NotebookOptions {
-	if b.Config.DriveMount == DriveMountOff || b.Config.DriveCredential == nil {
+	mode := NormalizeDriveMountMode(b.Config.DriveMount)
+	if mode == DriveMountOff || b.Config.DriveCredential == nil {
 		return NotebookOptions{}
 	}
 	credential := *b.Config.DriveCredential
@@ -618,15 +621,31 @@ func (b *Backend) notebookOptions() NotebookOptions {
 	if mountPath == "" {
 		mountPath = "/content/drive"
 	}
-	return NotebookOptions{DriveMount: &DriveMountSpec{Credential: credential, MountPath: mountPath, TimeoutSecs: DriveMountTimeoutFromEnv()}}
+	spec := DriveMountSpec{Credential: credential, MountPath: mountPath, TimeoutSecs: DriveMountTimeoutFromEnv()}
+	if mode == DriveMountRclone {
+		spec.Kind = DriveMountKindRclone
+		spec.Rclone = RcloneMountOptionsFromEnv()
+		// The operator asked for Drive explicitly: writing to the ephemeral disk
+		// instead must not be reported as success.
+		spec.Required = true
+	} else {
+		spec.Kind = DriveMountKindDriveFS
+	}
+	return NotebookOptions{DriveMount: &spec}
 }
 
-// driveMountNotice extracts the reason the runtime could not mount Drive, if
-// the bootstrap reported one. Without this the condition would be invisible:
-// the mount happens in the bootstrap cell, whose output is not part of the task
-// result unless it is surfaced here.
+// driveMountNotice extracts the reason the runtime could not mount Drive, or
+// could not flush it, if the bootstrap or finalizer reported one. Without this
+// the condition would be invisible: the mount happens in the bootstrap cell and
+// the flush in the finalizer, whose output is not part of the task result unless
+// it is surfaced here.
 func driveMountNotice(output string) string {
-	index := strings.Index(output, driveMountUnavailableMarker)
+	index := -1
+	for _, marker := range []string{driveMountUnavailableMarker, driveFlushTimeoutMarker} {
+		if found := strings.Index(output, marker); found >= 0 && (index < 0 || found < index) {
+			index = found
+		}
+	}
 	if index < 0 {
 		return ""
 	}
