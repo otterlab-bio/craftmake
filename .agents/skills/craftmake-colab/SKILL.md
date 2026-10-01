@@ -204,6 +204,22 @@ existing files. The bundled default client is rclone's public one, whose quota i
 shared globally — for real workloads set your own
 `CRAFTMAKE_COLAB_DRIVE_CLIENT_ID`/`_SECRET`.
 
+The transport is built for real workspaces, not just small files:
+
+- **Unchanged files are skipped.** Each file's MD5 is compared with the
+  `md5Checksum` Drive reports for it, so an unchanged workspace costs one listing
+  (the run reports `N uploaded, M unchanged (skipped)`). A file without a reported
+  checksum is uploaded rather than assumed identical.
+- **Large files are chunked and resumable.** Above 5 MiB the file travels as a
+  resumable session in 8 MiB chunks. After a failed chunk the client asks the
+  server what it committed before sending more, because a chunk whose response was
+  lost may already be stored and resending it would duplicate bytes.
+- **Interrupted uploads resume.** The session is remembered under
+  `<project>/.craftmake/state/drive-uploads/` (`0600`, excluded from the sync and
+  from git; override with `CRAFTMAKE_COLAB_DRIVE_RESUME_DIR`), keyed by folder,
+  name, size and checksum. An expired session is detected and replaced.
+- Both directions stream from/to disk, so a large artifact need not fit in memory.
+
 ### 4.6 Mounting Drive (`drive_mount`)
 
 Mounting is opt-in. `rclone` is the mechanism that works; `drivefs` does not.

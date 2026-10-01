@@ -217,9 +217,23 @@ func driveAccessTokenManager(auth colab.SessionAuth) (*colab.TokenManager, strin
 	return manager, refreshToken, nil
 }
 
+// driveResumeDir is where resumable upload sessions are remembered: a large
+// upload that a crash or a kill interrupted continues on the next run instead of
+// starting over. It lives in craftmake's own state directory, which is excluded
+// from the workspace sync and from git.
+func driveResumeDir(projectDir string) string {
+	if override := strings.TrimSpace(os.Getenv("CRAFTMAKE_COLAB_DRIVE_RESUME_DIR")); override != "" {
+		return override
+	}
+	if strings.TrimSpace(projectDir) == "" {
+		return ""
+	}
+	return filepath.Join(projectDir, ".craftmake", "state", "drive-uploads")
+}
+
 // newColabDriveStore builds the Drive REST store for a session, or returns nil
 // when the session has no Drive credential.
-func newColabDriveStore(auth colab.SessionAuth) (colab.DriveStore, error) {
+func newColabDriveStore(auth colab.SessionAuth, projectDir string) (colab.DriveStore, error) {
 	manager, _, err := driveAccessTokenManager(auth)
 	if err != nil {
 		return nil, err
@@ -227,5 +241,7 @@ func newColabDriveStore(auth colab.SessionAuth) (colab.DriveStore, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("colab.drive_transport=rest requires a Drive credential; run `craftmake colab drive login --session %s` first", auth.SessionID)
 	}
-	return colab.NewDriveRESTClient(func() (string, error) { return manager.AccessToken(context.Background()) }, nil), nil
+	store := colab.NewDriveRESTClient(func() (string, error) { return manager.AccessToken(context.Background()) }, nil)
+	store.SessionDir = driveResumeDir(projectDir)
+	return store, nil
 }

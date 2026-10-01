@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -243,26 +244,44 @@ func TestUploadWorkspaceGivesUpAfterAttempts(t *testing.T) {
 }
 
 // fakeDriveStore records what the REST transport uploads and serves what it
-// should restore.
+// should restore. It also mirrors the store's incremental behaviour: content it
+// already holds is reported as skipped rather than uploaded again.
 type fakeDriveStore struct {
 	uploaded map[string]string
 	restore  map[string]string
+	// uploadedPaths records the local paths the backend streamed from, so a test
+	// can prove the file was not read into memory by the caller.
+	uploadedPaths []string
 }
 
 func newFakeDriveStore() *fakeDriveStore {
 	return &fakeDriveStore{uploaded: map[string]string{}}
 }
 
-func (f *fakeDriveStore) Upload(_ context.Context, folderPath, name string, data []byte) error {
+func (f *fakeDriveStore) Upload(_ context.Context, folderPath, name, localPath string) (DriveUploadResult, error) {
 	key := name
 	if folderPath != "" {
 		key = folderPath + "/" + name
 	}
+	f.uploadedPaths = append(f.uploadedPaths, localPath)
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return DriveUploadResult{}, err
+	}
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return DriveUploadResult{}, err
+	}
+	// Mirror the store's incremental behaviour: identical content already in
+	// Drive is reported as skipped rather than transferred again.
+	if existing, ok := f.uploaded[key]; ok && existing == string(data) {
+		return DriveUploadResult{ID: "skipped-" + key, Size: info.Size(), Skipped: true}, nil
+	}
 	f.uploaded[key] = string(data)
-	return nil
+	return DriveUploadResult{ID: "id-" + key, Size: info.Size()}, nil
 }
 
-func (f *fakeDriveStore) Walk(_ context.Context, folderPath string, visit func(string, []byte) error) error {
+func (f *fakeDriveStore) Walk(_ context.Context, folderPath string, visit func(string, int64, io.Reader) error) error {
 	prefix := strings.Trim(folderPath, "/")
 	for relative, content := range f.restore {
 		if prefix != "" {
@@ -271,7 +290,7 @@ func (f *fakeDriveStore) Walk(_ context.Context, folderPath string, visit func(s
 			}
 			relative = strings.TrimPrefix(relative, prefix+"/")
 		}
-		if err := visit(relative, []byte(content)); err != nil {
+		if err := visit(relative, int64(len(content)), strings.NewReader(content)); err != nil {
 			return err
 		}
 	}
@@ -352,5 +371,57 @@ func TestDriveFolderDerivesFromDriveRoot(t *testing.T) {
 	explicit := &Backend{Config: Config{RemoteRoot: "/content/craftmake", DriveFolder: "custom/dir"}}
 	if got := explicit.driveFolder(); got != "custom/dir" {
 		t.Fatalf("explicit drive folder ignored: %q", got)
+	}
+}
+
+// TestPersistDriveWorkspaceReportsSkippedFiles pins the incremental behaviour at
+// the backend level: an unchanged workspace is reported as skipped, and the store
+// is handed paths so the content is streamed rather than read by the caller.
+func TestPersistDriveWorkspaceReportsSkippedFiles(t *testing.T) {
+	localRoot := t.TempDir()
+	mirror := filepath.Join(localRoot, ".craftmake", "colab-workspace", "outputs")
+	if err := os.MkdirAll(mirror, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, filepath.Join(mirror, "a.txt"), "aaa\n")
+	writeWorkspaceFile(t, filepath.Join(mirror, "b.txt"), "bbb\n")
+
+	store := newFakeDriveStore()
+	colabBackend := &Backend{Config: Config{LocalRoot: localRoot, DriveFolder: "craftmake",
+		DriveTransport: DriveTransportREST, DriveStore: store}}
+
+	first, err := colabBackend.persistDriveWorkspace(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Uploaded != 2 || first.Skipped != 0 {
+		t.Fatalf("first report = %#v, want both files uploaded", first)
+	}
+	for _, uploaded := range store.uploadedPaths {
+		if _, err := os.Stat(uploaded); err != nil {
+			t.Fatalf("the store must be given a readable path to stream from: %v", err)
+		}
+	}
+
+	// The same workspace again: nothing changed, so nothing is transferred.
+	second, err := colabBackend.persistDriveWorkspace(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Skipped != 2 || second.Uploaded != 0 {
+		t.Fatalf("second report = %#v, want both files skipped", second)
+	}
+	if got := store.uploaded["craftmake/outputs/a.txt"]; got != "aaa\n" {
+		t.Fatalf("Drive content = %q", got)
+	}
+
+	// A changed file is uploaded again.
+	writeWorkspaceFile(t, filepath.Join(mirror, "a.txt"), "changed\n")
+	third, err := colabBackend.persistDriveWorkspace(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Uploaded != 1 || third.Skipped != 1 {
+		t.Fatalf("third report = %#v, want one changed file uploaded", third)
 	}
 }

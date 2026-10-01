@@ -235,7 +235,7 @@ func buildColabBackend(ctx context.Context, config colabBackendConfig) (backend.
 	// The REST transport needs an access token per request, so it reuses the same
 	// Drive-scoped credential and refreshes it through the token manager.
 	if colabpkg.NormalizeDriveTransport(config.DriveTransport) == colabpkg.DriveTransportREST || colabpkg.NormalizeDriveTransport(os.Getenv("CRAFTMAKE_COLAB_DRIVE_TRANSPORT")) == colabpkg.DriveTransportREST {
-		store, storeErr := newColabDriveStore(auth)
+		store, storeErr := newColabDriveStore(auth, config.ProjectDirectory)
 		if storeErr != nil {
 			return nil, storeErr
 		}

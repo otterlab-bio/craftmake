@@ -213,7 +213,7 @@ func TestDriveAccessTokenManagerGuardsClientSwitch(t *testing.T) {
 func TestColabDriveTransportRequiresCredential(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRAFTMAKE_DRIVE_REFRESH_TOKEN", "")
-	store, err := newColabDriveStore(colabpkg.SessionAuth{SessionID: "gpu"})
+	store, err := newColabDriveStore(colabpkg.SessionAuth{SessionID: "gpu"}, "")
 	if err == nil {
 		t.Fatal("expected an error without a Drive credential")
 	}
@@ -226,7 +226,7 @@ func TestColabDriveTransportRequiresCredential(t *testing.T) {
 
 	// With a credential the store is built and refreshes through the manager.
 	t.Setenv("CRAFTMAKE_DRIVE_REFRESH_TOKEN", "drive-token")
-	store, err = newColabDriveStore(colabpkg.SessionAuth{SessionID: "gpu"})
+	store, err = newColabDriveStore(colabpkg.SessionAuth{SessionID: "gpu"}, "")
 	if err != nil || store == nil {
 		t.Fatalf("expected a store with a credential: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -320,12 +321,21 @@ func (b *Backend) restoreDriveWorkspace(ctx context.Context, transport Workspace
 		return err
 	}
 	restored := 0
-	if err := b.Config.DriveStore.Walk(ctx, b.driveFolder(), func(relativePath string, data []byte) error {
+	if err := b.Config.DriveStore.Walk(ctx, b.driveFolder(), func(relativePath string, size int64, content io.Reader) error {
 		target := filepath.Join(mirrorRoot, filepath.FromSlash(relativePath))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(target, data, 0o644); err != nil {
+		// Stream to disk: a restored checkpoint must not have to fit in memory.
+		file, err := os.Create(target)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(file, content); err != nil {
+			file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
 			return err
 		}
 		restored++
@@ -343,16 +353,30 @@ func (b *Backend) restoreDriveWorkspace(ctx context.Context, transport Workspace
 	return uploadWorkspaceWithRetry(ctx, transport, runtime, archive)
 }
 
+// drivePersistReport summarises what a Drive workspace upload did, so a run can
+// say how much of the workspace was actually transferred.
+type drivePersistReport struct {
+	Uploaded int
+	// Skipped counts the files Drive already had, which the checksum comparison
+	// avoids transferring.
+	Skipped int
+	// Resumed counts the files that continued a previous partial upload.
+	Resumed int
+}
+
 // persistDriveWorkspace uploads the local mirror into the Drive folder.
-func (b *Backend) persistDriveWorkspace(ctx context.Context) (int, error) {
+//
+// Each file is streamed from disk by the store, which also compares checksums, so
+// an unchanged workspace costs one listing instead of a full re-upload.
+func (b *Backend) persistDriveWorkspace(ctx context.Context) (drivePersistReport, error) {
+	report := drivePersistReport{}
 	mirrorRoot := b.syncOutRoot()
 	if _, err := os.Stat(mirrorRoot); err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return report, nil
 		}
-		return 0, err
+		return report, err
 	}
-	uploaded := 0
 	err := filepath.WalkDir(mirrorRoot, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -364,10 +388,6 @@ func (b *Backend) persistDriveWorkspace(ctx context.Context) (int, error) {
 		if err != nil {
 			return err
 		}
-		data, err := os.ReadFile(current)
-		if err != nil {
-			return err
-		}
 		folder := b.driveFolder()
 		if directory := path.Dir(filepath.ToSlash(relative)); directory != "." {
 			if folder == "" {
@@ -376,13 +396,22 @@ func (b *Backend) persistDriveWorkspace(ctx context.Context) (int, error) {
 				folder = path.Join(folder, directory)
 			}
 		}
-		if err := b.Config.DriveStore.Upload(ctx, folder, filepath.Base(relative), data); err != nil {
+		outcome, err := b.Config.DriveStore.Upload(ctx, folder, filepath.Base(relative), current)
+		if err != nil {
 			return fmt.Errorf("upload %s to Drive: %w", relative, err)
 		}
-		uploaded++
+		switch {
+		case outcome.Skipped:
+			report.Skipped++
+		default:
+			if outcome.Resumed {
+				report.Resumed++
+			}
+			report.Uploaded++
+		}
 		return nil
 	})
-	return uploaded, err
+	return report, err
 }
 
 // driveFolder is the Drive folder the workspace mirrors into.
@@ -449,8 +478,15 @@ func (b *Backend) syncWorkspaceOut(ctx context.Context, runtime Runtime) error {
 		return err
 	}
 	if b.Config.DriveTransport == DriveTransportREST && b.Config.DriveStore != nil {
-		if _, err := b.persistDriveWorkspace(ctx); err != nil {
+		report, err := b.persistDriveWorkspace(ctx)
+		if err != nil {
 			return err
+		}
+		// Say what actually moved: with the checksum comparison an unchanged
+		// workspace transfers nothing, which is worth reporting rather than
+		// leaving the operator to guess.
+		if report.Skipped > 0 || report.Resumed > 0 {
+			fmt.Fprintf(os.Stderr, "notice: Drive workspace persisted: %d uploaded, %d unchanged (skipped), %d resumed\n", report.Uploaded, report.Skipped, report.Resumed)
 		}
 	}
 	return nil

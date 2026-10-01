@@ -365,6 +365,27 @@ craftmake action run sync_roundtrip --backend colab --force
   local files win where they overlap.
 - Uploads replace an existing file of the same name, so repeated runs converge
   instead of piling up duplicates.
+- **Unchanged files are not transferred.** Each file's MD5 is compared with the
+  `md5Checksum` Drive reports for the file already there, and a match skips the
+  transfer: an unchanged workspace costs one listing. A file whose checksum Drive
+  does not report (its Google-native document types have no byte content) is
+  uploaded rather than assumed identical. The run reports the split, e.g.
+  `notice: Drive workspace persisted: 3 uploaded, 41 unchanged (skipped), 1 resumed`.
+- **Large files are chunked and resumable.** Anything above 5 MiB is sent as a
+  resumable session in 8 MiB chunks (`Content-Range`), so a dropped connection
+  does not restart a multi-gigabyte checkpoint. After a failed chunk the client
+  asks the server how much it actually committed before sending anything else —
+  a chunk whose response was lost may already have been stored, and resending it
+  would append the same bytes twice.
+- **An interrupted upload resumes on the next run.** The resumable session is
+  remembered under `<project>/.craftmake/state/drive-uploads/` (`0600`, and that
+  directory is excluded from the workspace sync and from git), keyed by folder,
+  name, size and checksum, so a changed file never resumes into an unrelated
+  upload. Override the location with `CRAFTMAKE_COLAB_DRIVE_RESUME_DIR`, or leave
+  it empty/unwritable to fall back to resuming only within a single run. An
+  expired session is detected and replaced, not retried forever.
+- Both directions stream: the file is read from disk (and written back to disk)
+  rather than held in memory, so a large artifact does not have to fit in RAM.
 - **Use your own OAuth client for real workloads.** The bundled default is
   rclone's public client, whose per-project quota is shared with every other
   rclone user; it can reject requests with
