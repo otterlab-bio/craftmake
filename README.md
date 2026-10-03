@@ -407,7 +407,12 @@ go test ./internal/backend/colab/ -run TestDriveRESTLive -v -timeout 20m
 
 It uploads a 12 MiB file (so the chunked path is used), re-uploads it to check the
 checksum skip, restores it to prove the bytes round-trip, and replaces it to check
-that the resumable update path does not create a second file. It writes into
+that the resumable update path does not create a second file. A second test,
+`TestDriveRESTLiveResumeAfterInterruption`, interrupts an upload after two of six
+chunks, then hands the saved session to a fresh client and asserts that it sends
+only the four missing chunks and still reproduces the file byte for byte — the
+resumed `Content-Range`, the stored offset and the server's committed offset are
+exactly the details an emulator can get wrong. It writes into
 `CRAFTMAKE_DRIVE_LIVE_FOLDER` (default `craftmake-rest-live-verify`) and deletes
 what it created. It is skipped unless `CRAFTMAKE_DRIVE_LIVE` is set, and it
 accepts `CRAFTMAKE_DRIVE_LIVE_CLIENT_ID`/`_SECRET` so a newly created OAuth client

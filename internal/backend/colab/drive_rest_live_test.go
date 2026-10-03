@@ -220,3 +220,157 @@ func TestDriveRESTLiveChunkedUploadSkipAndRestore(t *testing.T) {
 	}
 	t.Logf("live replacement reused the existing file")
 }
+
+// isChunkPut reports whether a request sends a chunk of a resumable upload (as
+// opposed to the status query, which carries "bytes */<total>").
+func isChunkPut(r *http.Request) bool {
+	if r.Method != http.MethodPut {
+		return false
+	}
+	contentRange := r.Header.Get("Content-Range")
+	return contentRange != "" && !strings.HasPrefix(contentRange, "bytes */")
+}
+
+// interruptedChunkDoer refuses chunk PUTs once a fixed number have been
+// accepted, so a test can interrupt an upload at an exact point instead of
+// racing a timer. It also counts the chunk PUTs it saw.
+type interruptedChunkDoer struct {
+	inner     HTTPDoer
+	allowance int
+	accepted  int
+	chunkPuts int
+}
+
+func (d *interruptedChunkDoer) Do(request *http.Request) (*http.Response, error) {
+	if !isChunkPut(request) {
+		return d.inner.Do(request)
+	}
+	d.chunkPuts++
+	if d.accepted >= d.allowance {
+		return nil, fmt.Errorf("injected interruption: refusing chunk PUT")
+	}
+	response, err := d.inner.Do(request)
+	if err == nil && (response.StatusCode == driveResumeIncomplete || (response.StatusCode >= 200 && response.StatusCode < 300)) {
+		d.accepted++
+	}
+	return response, err
+}
+
+// TestDriveRESTLiveResumeAfterInterruption is the live proof for the resume path:
+// an upload is interrupted against the real API after a couple of chunks, and a
+// fresh client with the same session directory finishes it without re-sending
+// what the server already holds.
+//
+// The unit tests cover this against the emulator; this one exists because the
+// stored session, the server's committed offset and the resumed Content-Range
+// are exactly the details an emulator can get wrong.
+func TestDriveRESTLiveResumeAfterInterruption(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("CRAFTMAKE_DRIVE_LIVE")) == "" {
+		t.Skip("set CRAFTMAKE_DRIVE_LIVE=1 to run against the real Drive API")
+	}
+	originalChunk, originalBackoff := driveChunkSize, driveRetryBackoff
+	driveChunkSize = 4 << 20
+	// The interruption is injected locally, so there is no quota window to wait
+	// out; keep the retry cycles quick.
+	driveRetryBackoff = 2 * time.Second
+	t.Cleanup(func() { driveChunkSize, driveRetryBackoff = originalChunk, originalBackoff })
+
+	token := liveDriveTokenFetcher(t)
+	folder := envOr("CRAFTMAKE_DRIVE_LIVE_FOLDER", "craftmake-rest-live-verify")
+	t.Cleanup(func() { liveDriveDelete(t, token, folder) })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	// 24 MiB at 4 MiB per chunk: six chunks, so an interruption after two leaves
+	// four to send.
+	const size = 24 << 20
+	payload := make([]byte, size)
+	for index := range payload {
+		payload[index] = byte((index * 7) % 251)
+	}
+	localPath := filepath.Join(t.TempDir(), "resume.bin")
+	if err := os.WriteFile(localPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := t.TempDir()
+
+	// 1. An upload that is cut off after two accepted chunks.
+	doer := &interruptedChunkDoer{inner: http.DefaultClient, allowance: 2}
+	first := NewDriveRESTClient(token, doer)
+	first.SessionDir = sessionDir
+	_, err := first.Upload(ctx, folder, "resume.bin", localPath)
+	if err == nil {
+		t.Fatal("the interrupted upload must report a failure")
+	}
+	if !strings.Contains(err.Error(), "continues it") {
+		t.Fatalf("the failure must say the session is kept for a later run, got: %v", err)
+	}
+	t.Logf("interrupted upload reported: %v", err)
+
+	// 2. The session must be on disk, with the server's committed offset.
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one saved session, got %v", entries)
+	}
+	raw, err := os.ReadFile(filepath.Join(sessionDir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session driveUploadSession
+	if err := json.Unmarshal(raw, &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Uploaded <= 0 || session.Uploaded >= size {
+		t.Fatalf("saved session offset = %d, want a partial offset", session.Uploaded)
+	}
+	t.Logf("interrupted after %d of %d bytes; session saved", session.Uploaded, size)
+
+	// 3. A fresh client must finish it, sending only the missing chunks.
+	counting := &interruptedChunkDoer{inner: http.DefaultClient, allowance: 1 << 30}
+	second := NewDriveRESTClient(token, counting)
+	second.SessionDir = sessionDir
+	result, err := second.Upload(ctx, folder, "resume.bin", localPath)
+	if err != nil {
+		t.Fatalf("resumed upload: %v", err)
+	}
+	if !result.Resumed {
+		t.Fatal("the second run must report that it resumed")
+	}
+	remaining := int((size - session.Uploaded + driveChunkSize - 1) / driveChunkSize)
+	if counting.chunkPuts != remaining {
+		t.Fatalf("the resumed run sent %d chunks, want exactly the %d missing ones", counting.chunkPuts, remaining)
+	}
+	t.Logf("resumed run sent %d of the 6 chunks, skipping the %d bytes already stored", counting.chunkPuts, session.Uploaded)
+
+	// 4. The resumed upload must reproduce the bytes exactly.
+	var restored bytes.Buffer
+	if err := second.Walk(ctx, folder, func(relativePath string, receivedSize int64, content io.Reader) error {
+		if relativePath != "resume.bin" {
+			return nil
+		}
+		if receivedSize != int64(size) {
+			t.Fatalf("restored size = %d, want %d", receivedSize, size)
+		}
+		_, err := io.Copy(&restored, content)
+		return err
+	}); err != nil {
+		t.Fatalf("live restore after resume: %v", err)
+	}
+	if !bytes.Equal(restored.Bytes(), payload) {
+		sum, want := md5.Sum(restored.Bytes()), md5.Sum(payload)
+		t.Fatalf("resumed content differs: md5 %s want %s", hex.EncodeToString(sum[:]), hex.EncodeToString(want[:]))
+	}
+	t.Logf("resumed upload restored %d bytes byte for byte", restored.Len())
+
+	// 5. A finished upload must forget its session.
+	entries, err = os.ReadDir(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("the session file must be cleared after success: %v", entries)
+	}
+}
