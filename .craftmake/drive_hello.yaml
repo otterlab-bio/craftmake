@@ -4,6 +4,11 @@ backend: colab
 colab:
   session: gpu
   drive_root: /content/drive/MyDrive/craftmake
+  # Mounting Drive is what makes /content/drive real. `rclone` is the mode that
+  # works with a Drive-scoped credential; it needs `craftmake colab drive login
+  # --session gpu` first, and it is a *required* mount: if it does not come up,
+  # the task fails instead of writing to the ephemeral VM disk.
+  drive_mount: rclone
 jobs:
   drive_test:
     steps:
@@ -13,16 +18,18 @@ jobs:
           import sys
           from pathlib import Path
 
-          # A verified limitation: /content/drive is only a real mount when the
-          # runtime has mounted DriveFS. Over a bare kernel WebSocket
-          # google.colab.drive.mount() cannot work, and writing to that path
-          # would silently land on the ephemeral VM disk instead of Drive, so
-          # fail loudly rather than lose data.
+          # Belt and braces: with colab.drive_mount set, craftmake already fails
+          # the task when the mount did not come up. Keep the check anyway, since
+          # any action that writes to /content/drive should verify the path is
+          # real rather than trust it: over a bare kernel WebSocket
+          # google.colab.drive.mount() cannot work, and a write to an unmounted
+          # path would silently land on the ephemeral VM disk instead of Drive.
           if not os.path.ismount('/content/drive'):
               print(
                   'ERROR: /content/drive is not mounted, so anything written here would be '
-                  'lost with the ephemeral VM. Use an action with colab.sync_out to move '
-                  'results back, or run on a runtime with DriveFS mounted.',
+                  'lost with the ephemeral VM. Set colab.drive_mount: rclone (with a Drive '
+                  'credential from `craftmake colab drive login`) to make the path real, or '
+                  'use colab.drive_transport: rest / colab.sync_out to keep results.',
                   file=sys.stderr,
               )
               sys.exit(2)
@@ -35,13 +42,7 @@ jobs:
           print('Created cloud file:', hello_file)
           print('File content:', hello_file.read_text().strip())
 
-          # The task finalizer flushes before the instance is released; flush here
-          # too when this step must guarantee durability.
-          try:
-              from google.colab import drive
-              print('Flushing writes to Google Drive cloud...')
-              drive.flush_and_unmount()
-              print('Flushed and unmounted successfully!')
-          except Exception as exc:
-              print('Notice: flush skipped:', exc)
+          # Writes through the mount are buffered and uploaded afterwards; the
+          # task finalizer waits for that queue to drain before releasing the
+          # mount, so nothing has to be flushed here.
           EOF

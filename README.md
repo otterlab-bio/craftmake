@@ -394,12 +394,44 @@ craftmake action run sync_roundtrip --backend colab --force
   own client removes the limit:
   `CRAFTMAKE_COLAB_DRIVE_CLIENT_ID` / `CRAFTMAKE_COLAB_DRIVE_CLIENT_SECRET`.
 
+**Verifying the transport against the real service.** The offline tests drive a
+local emulator, which cannot prove that the protocol details — the resumable
+`Location` header, the `308`/`Range` acknowledgement, the `md5Checksum` Drive
+reports — behave as assumed. An opt-in integration test does exactly that:
+
+```bash
+CRAFTMAKE_DRIVE_LIVE=1 \
+CRAFTMAKE_DRIVE_LIVE_REFRESH_TOKEN=<refresh token> \
+go test ./internal/backend/colab/ -run TestDriveRESTLive -v -timeout 20m
+```
+
+It uploads a 12 MiB file (so the chunked path is used), re-uploads it to check the
+checksum skip, restores it to prove the bytes round-trip, and replaces it to check
+that the resumable update path does not create a second file. It writes into
+`CRAFTMAKE_DRIVE_LIVE_FOLDER` (default `craftmake-rest-live-verify`) and deletes
+what it created. It is skipped unless `CRAFTMAKE_DRIVE_LIVE` is set, and it
+accepts `CRAFTMAKE_DRIVE_LIVE_CLIENT_ID`/`_SECRET` so a newly created OAuth client
+can be validated without touching the session configuration. Note that the shared
+bundled client's quota can make it fail intermittently with `403 ... rateLimitExceeded`
+through no fault of the code; wait for a quieter window, or point it at your own
+client.
+
 #### Writing to Drive from a step
 
 A step must not assume `/content/drive` exists: writing there without a real
-mount silently lands on the ephemeral VM disk while the step still exits 0. The
-checked-in [`drive_hello.yaml`](.craftmake/drive_hello.yaml) therefore fails
-loudly when the mount is missing:
+mount silently lands on the ephemeral VM disk while the step still exits 0.
+
+The checked-in [`drive_hello.yaml`](.craftmake/drive_hello.yaml) shows the whole
+working path — [`colab.drive_mount: rclone`](#mounting-drive) plus the guard below
+— and is the shortest way to confirm a real mount end to end:
+
+```bash
+craftmake colab drive login --session gpu          # Drive-scoped credential (once)
+craftmake action run drive_hello --backend colab --force
+```
+
+The guard is still worth keeping, because the check is what tells the reader (and
+the next person editing the step) that the path has to be real:
 
 ```python
 import os, sys
@@ -412,13 +444,11 @@ if not os.path.ismount('/content/drive'):
 drive_dir = Path('/content/drive/MyDrive/craftmake')
 drive_dir.mkdir(parents=True, exist_ok=True)
 (drive_dir / 'helloworld.txt').write_text('helloworld from craftmake colab!')
-
-try:
-    from google.colab import drive
-    drive.flush_and_unmount()
-except Exception as exc:
-    print('Notice: flush skipped:', exc)
 ```
+
+Nothing has to be flushed: writes through an rclone mount are buffered, and the
+task finalizer waits for that queue to drain before releasing the mount (see
+below).
 
 **Optional Drive file service.** Setting `CRAFTMAKE_COLAB_DRIVE_FILES_URL` to a service exposing the `/drive/read` and `/drive/write` endpoints additionally enables Drive-backed log materialization and `RecoverSubmission`, so logs and results can be recovered from the durable workspace without restarting a runtime.
 

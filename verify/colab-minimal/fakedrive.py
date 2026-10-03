@@ -5,6 +5,10 @@ It implements just the endpoints the Drive REST transport uses, so the transport
 can be verified end to end without touching the real API (and without being
 subject to the shared rclone client's quota).
 
+Listings report each file's md5Checksum and size like the real API does, and
+/__state counts content uploads, so the harness can prove that an unchanged
+workspace is not transferred again.
+
     python3 fakedrive.py --port 0
 
 Prints the bound port on stdout, then serves:
@@ -17,6 +21,7 @@ Prints the bound port on stdout, then serves:
 """
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -32,6 +37,8 @@ class Drive:
         self.next_id = 0
         self.entries = {"root": {"id": "root", "name": "root", "parent": None, "mime": FOLDER_MIME, "content": b""}}
         self.requests = []
+        # Content writes only: creating a folder is not an upload.
+        self.uploads = 0
 
     def new_id(self):
         self.next_id += 1
@@ -65,7 +72,7 @@ class Drive:
         for entry in self.entries.values():
             if entry["mime"] != FOLDER_MIME and entry["parent"] is not None:
                 files[self.path_of(entry)] = entry["content"].decode("utf-8", "replace")
-        return {"files": files, "requests": self.requests}
+        return {"files": files, "requests": self.requests, "uploads": self.uploads}
 
 
 def parse_query(query):
@@ -107,7 +114,11 @@ class Handler(BaseHTTPRequestHandler):
             if not part.strip() or part.strip() == b"--":
                 continue
             head, _, body = part.partition(b"\r\n\r\n")
-            body = body.rstrip(b"\r\n")
+            # Strip only the CRLF that frames the part before the next boundary.
+            # A blanket rstrip would also eat a newline at the end of the file
+            # content, which changes the stored bytes and its checksum.
+            if body.endswith(b"\r\n"):
+                body = body[:-2]
             if b"application/json" in head:
                 try:
                     metadata = json.loads(body.decode())
@@ -130,7 +141,15 @@ class Handler(BaseHTTPRequestHandler):
             parent, name, folders_only = parse_query(query)
             with drive.lock:
                 drive.requests.append(("list", parent, name))
-                files = [{"id": e["id"], "name": e["name"], "mimeType": e["mime"]} for e in drive.children(parent, name, folders_only)]
+                files = []
+                for e in drive.children(parent, name, folders_only):
+                    item = {"id": e["id"], "name": e["name"], "mimeType": e["mime"]}
+                    if e["mime"] != FOLDER_MIME:
+                        # The real API reports both, and the transport compares
+                        # them to decide whether a file has to be sent at all.
+                        item["md5Checksum"] = hashlib.md5(e["content"]).hexdigest()
+                        item["size"] = str(len(e["content"]))
+                    files.append(item)
             self._json({"files": files})
             return
         match = re.match(r"^/drive/v3/files/([^/]+)$", path)
@@ -170,6 +189,7 @@ class Handler(BaseHTTPRequestHandler):
                 entry = {"id": drive.new_id(), "name": metadata.get("name", ""), "parent": parent,
                          "mime": "application/octet-stream", "content": content}
                 drive.entries[entry["id"]] = entry
+                drive.uploads += 1
                 drive.requests.append(("create-file", parent, entry["name"], len(content)))
             self._json({"id": entry["id"]})
             return
@@ -187,6 +207,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         entry["content"] = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         with drive.lock:
+            drive.uploads += 1
             drive.requests.append(("update-file", entry["name"], len(entry["content"])))
         self._json({"id": entry["id"]})
 

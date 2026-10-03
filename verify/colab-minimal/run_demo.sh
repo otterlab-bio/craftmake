@@ -396,6 +396,37 @@ if grep -q "craftmake-e2e/work/input.txt" "$STATE/fakedrive-state.json"; then
 else
   bad "the local project was not mirrored to Drive"
 fi
+
+# A second run of the same action must not transfer anything: every file is
+# already in Drive with the same checksum. This is the incremental path, and it
+# is asserted through the real CLI rather than only in unit tests.
+read_fake_uploads() {
+  python3 - "$FAKE_DRIVE_PORT" > "$1" <<'PYEOF'
+import json, sys, urllib.request
+with urllib.request.urlopen("http://127.0.0.1:%s/__state" % sys.argv[1], timeout=10) as response:
+    json.dump(json.load(response), sys.stdout)
+PYEOF
+  python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['uploads'])" "$1"
+}
+UPLOADS_BEFORE="$(read_fake_uploads "$STATE/fakedrive-before.json")"
+
+CRAFTMAKE_COLAB_DRIVE_TRANSPORT=rest \
+CRAFTMAKE_DRIVE_REFRESH_TOKEN="dummy-drive-refresh-token" \
+CRAFTMAKE_DRIVE_API_URL="http://127.0.0.1:$FAKE_DRIVE_PORT/drive/v3" \
+CRAFTMAKE_DRIVE_UPLOAD_URL="http://127.0.0.1:$FAKE_DRIVE_PORT/upload/drive/v3" \
+  "$CRAFTMAKE" action run drive_rest_probe --backend colab \
+  --colab-auth-config "$AUTH_CONFIG" --dir "$PROJECT" --force \
+  < /dev/null > "$STATE/action-drive-rest-again.out" 2>&1
+assert_rc "the repeated REST run exits 0" "$?" "0"
+assert_contains "the repeated run is still successful" "$(result_json_of "$(run_id_of "$STATE/action-drive-rest-again.out")")" '"status": "succeeded"'
+assert_contains "the repeated run reports the unchanged files" "$STATE/action-drive-rest-again.out" "unchanged (skipped)"
+UPLOADS_AFTER="$(read_fake_uploads "$STATE/fakedrive-after.json")"
+if [ "$UPLOADS_AFTER" = "$UPLOADS_BEFORE" ]; then
+  ok "the unchanged workspace was not transferred again (uploads stayed at $UPLOADS_BEFORE)"
+else
+  bad "the second run re-uploaded content ($UPLOADS_BEFORE -> $UPLOADS_AFTER)"
+fi
+
 kill "$FAKE_DRIVE_PID" 2>/dev/null
 
 # ------------------------------------------------------------------ summary
