@@ -212,6 +212,25 @@ func TestUploadWorkspaceRetriesTransientKernelFailure(t *testing.T) {
 	}
 }
 
+// TestUploadWorkspaceRetriesKernelThatDidNotRunTheCell covers the other way a
+// fresh runtime shows up: the request is accepted but the cell does not run, so
+// the confirmation marker is missing. Verified live that sync_in succeeds on a
+// fresh runtime; this keeps the recovery in place for when it is slower than the
+// warm-up.
+func TestUploadWorkspaceRetriesKernelThatDidNotRunTheCell(t *testing.T) {
+	original := workspaceRetryBackoff
+	workspaceRetryBackoff = time.Millisecond
+	defer func() { workspaceRetryBackoff = original }()
+
+	transport := &flakyUploadTransport{failures: 1, lastError: &RemoteError{Kind: ErrorKernelNotReady, Operation: "upload workspace", Err: errors.New("runtime did not confirm the workspace upload")}}
+	if err := uploadWorkspaceWithRetry(context.Background(), transport, Runtime{ID: "runtime-1"}, []byte("archive")); err != nil {
+		t.Fatalf("a kernel that did not run the cell yet should be retried: %v", err)
+	}
+	if transport.attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", transport.attempts)
+	}
+}
+
 // TestUploadWorkspaceDoesNotRetryPermanentFailures keeps a protocol or
 // configuration error from being repeated three times.
 func TestUploadWorkspaceDoesNotRetryPermanentFailures(t *testing.T) {

@@ -234,7 +234,11 @@ print("CRAFTMAKE_SYNC_IN_OK", _count)
 		return err
 	}
 	if !strings.Contains(output, "CRAFTMAKE_SYNC_IN_OK") {
-		return &RemoteError{Kind: ErrorProtocolMismatch, Operation: "upload workspace", Err: fmt.Errorf("runtime did not confirm the workspace upload: %q", strings.TrimSpace(output))}
+		// The kernel took the request but did not run the cell, which is what a
+		// freshly assigned runtime does before its kernel is up. That is worth
+		// another attempt rather than a protocol error, because the caller's
+		// upload is idempotent.
+		return &RemoteError{Kind: ErrorKernelNotReady, Operation: "upload workspace", Err: fmt.Errorf("runtime did not confirm the workspace upload: %q", strings.TrimSpace(output))}
 	}
 	return nil
 }

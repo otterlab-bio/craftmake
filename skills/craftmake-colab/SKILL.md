@@ -286,8 +286,13 @@ remains the fallback. Use `rclone`, `sync_out`, or the Drive REST API.
   --authorize` cannot pre-authorize a later ephemeral run; consent must be given
   while the run that needs it is waiting (the run-level prompt is the working
   path).
-- **`sync_in` before the notebook can be too early** on a fresh runtime; `sync_out`
-  after the notebook is reliable, which is why `sync_in` defaults to off.
+- **`sync_in` on a fresh runtime is protected twice.** The executor waits (bounded)
+  for the kernel to report `idle` before connecting, and the upload is retried when
+  the kernel drops the connection or accepts the request without running the cell.
+  Both are safe to repeat because the upload overwrites the same tree. Verified
+  live: five fresh runtimes in a row delivered the project workspace. `sync_out`
+  after the notebook remains the reliable direction, and `sync_in` is opt-in
+  because the sync is opt-in in both directions, not because it is unsafe.
 
 ---
 

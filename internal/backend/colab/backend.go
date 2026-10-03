@@ -433,6 +433,13 @@ func (b *Backend) driveFolder() string {
 // uploadWorkspaceWithRetry retries the upload while the failure looks like a
 // kernel that is not answering yet. The operation overwrites files, so repeating
 // it is safe.
+//
+// Two failures are worth repeating, and they are the two ways a freshly assigned
+// runtime shows up: the kernel drops the connection (the channels WebSocket
+// answers before the kernel does), or it accepts the request but does not run the
+// cell, which is reported as a missing confirmation marker. Anything else - a
+// rejected archive, a bad credential - is returned as it is, so a real problem is
+// not retried three times before it is reported.
 func uploadWorkspaceWithRetry(ctx context.Context, transport WorkspaceTransport, runtime Runtime, archive []byte) error {
 	var lastErr error
 	for attempt := 1; attempt <= workspaceUploadAttempts; attempt++ {
@@ -441,7 +448,7 @@ func uploadWorkspaceWithRetry(ctx context.Context, transport WorkspaceTransport,
 			return nil
 		}
 		var remote *RemoteError
-		if !errors.As(lastErr, &remote) || remote.Kind != ErrorKernelDisconnected {
+		if !errors.As(lastErr, &remote) || !isRetryableWorkspaceUpload(remote.Kind) {
 			return lastErr
 		}
 		if attempt == workspaceUploadAttempts {
@@ -454,6 +461,12 @@ func uploadWorkspaceWithRetry(ctx context.Context, transport WorkspaceTransport,
 		}
 	}
 	return lastErr
+}
+
+// isRetryableWorkspaceUpload reports whether a failed workspace upload is worth
+// repeating.
+func isRetryableWorkspaceUpload(kind ErrorKind) bool {
+	return kind == ErrorKernelDisconnected || kind == ErrorKernelNotReady
 }
 
 // syncWorkspaceOut downloads the remote workspace and merges it into the local

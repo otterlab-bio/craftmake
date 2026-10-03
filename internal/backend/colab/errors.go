@@ -11,6 +11,10 @@ const (
 	ErrorAuthRequired       ErrorKind = "auth-required"
 	ErrorRuntimeUnavailable ErrorKind = "runtime-unavailable"
 	ErrorKernelDisconnected ErrorKind = "kernel-disconnected"
+	// ErrorKernelNotReady marks a runtime whose kernel accepted the request but
+	// has not run it yet, which is what a freshly assigned runtime does while its
+	// kernel is still starting. Operations that are safe to repeat may retry it.
+	ErrorKernelNotReady     ErrorKind = "kernel-not-ready"
 	ErrorTransferFailed     ErrorKind = "transfer-failed"
 	ErrorProtocolMismatch   ErrorKind = "protocol-mismatch"
 	ErrorMountNotAuthorized ErrorKind = "mount-not-authorized"
