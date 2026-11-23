@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-func TestMakeReleaseBuildsPortableLinuxArchives(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skipf("release archives target linux/amd64 and the packaged binary is executed by this test; skipping on %s", runtime.GOOS)
+func TestMakeReleaseBuildsPlatformArchives(t *testing.T) {
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skipf("no release archive for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	repositoryRoot := resolveRepositoryRoot(t)
 	temporaryDirectory := t.TempDir()
@@ -32,6 +32,8 @@ func TestMakeReleaseBuildsPortableLinuxArchives(t *testing.T) {
 	archiveNames := []string{
 		"craftmake_9.8.7-test_linux_amd64.tar.gz",
 		"craftmake_9.8.7-test_linux_arm64.tar.gz",
+		"craftmake_9.8.7-test_darwin_amd64.tar.gz",
+		"craftmake_9.8.7-test_darwin_arm64.tar.gz",
 	}
 	for _, archiveName := range archiveNames {
 		archivePath := filepath.Join(distributionDirectory, archiveName)
@@ -57,6 +59,9 @@ func TestMakeReleaseBuildsPortableLinuxArchives(t *testing.T) {
 	}
 
 	checksumCommand := exec.Command("sha256sum", "-c", "checksums.txt")
+	if _, err := exec.LookPath("sha256sum"); err != nil {
+		checksumCommand = exec.Command("shasum", "-a", "256", "-c", "checksums.txt")
+	}
 	checksumCommand.Dir = distributionDirectory
 	checksumOutput, err := checksumCommand.CombinedOutput()
 	if err != nil {
@@ -72,12 +77,12 @@ func TestMakeReleaseBuildsPortableLinuxArchives(t *testing.T) {
 	if err := os.MkdirAll(extractionDirectory, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	amd64Archive := filepath.Join(distributionDirectory, archiveNames[0])
-	extractCommand := exec.Command("tar", "-xzf", amd64Archive, "-C", extractionDirectory)
+	nativeArchive := "craftmake_9.8.7-test_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
+	extractCommand := exec.Command("tar", "-xzf", filepath.Join(distributionDirectory, nativeArchive), "-C", extractionDirectory)
 	if extractOutput, err := extractCommand.CombinedOutput(); err != nil {
-		t.Fatalf("extract amd64 release: %v\n%s", err, extractOutput)
+		t.Fatalf("extract native release: %v\n%s", err, extractOutput)
 	}
-	packageRoot := filepath.Join(extractionDirectory, strings.TrimSuffix(archiveNames[0], ".tar.gz"))
+	packageRoot := filepath.Join(extractionDirectory, strings.TrimSuffix(nativeArchive, ".tar.gz"))
 	installedBinary := filepath.Join(packageRoot, "bin", "craftmake")
 
 	versionCommand := exec.Command(installedBinary, "--version")

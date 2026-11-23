@@ -10,7 +10,7 @@ VERSION ?= 0.1.0-dev
 COMMIT ?= unknown
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 GO_LDFLAGS ?= -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE)
-RELEASE_PLATFORMS ?= linux/amd64 linux/arm64
+RELEASE_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
 .PHONY: all build install uninstall release release-archive test vet check clean
 
@@ -38,9 +38,11 @@ uninstall:
 release:
 	rm -rf "$(DIST_DIR)"
 	mkdir -p "$(DIST_DIR)"
-	$(MAKE) release-archive RELEASE_GOOS=linux RELEASE_GOARCH=amd64
-	$(MAKE) release-archive RELEASE_GOOS=linux RELEASE_GOARCH=arm64
-	cd "$(DIST_DIR)" && sha256sum *.tar.gz > checksums.txt
+	set -e; for platform in $(RELEASE_PLATFORMS); do \
+		$(MAKE) release-archive RELEASE_GOOS="$${platform%/*}" RELEASE_GOARCH="$${platform#*/}"; \
+	done
+	cd "$(DIST_DIR)" && if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum *.tar.gz > checksums.txt; else shasum -a 256 *.tar.gz > checksums.txt; fi
 
 release-archive:
 	mkdir -p "$(DIST_DIR)/craftmake_$(VERSION)_$(RELEASE_GOOS)_$(RELEASE_GOARCH)/bin"
