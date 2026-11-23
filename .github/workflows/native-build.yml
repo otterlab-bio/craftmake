@@ -1,0 +1,58 @@
+name: Native Platform Builds
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin-amd64
+            runner: macos-15-intel
+          - platform: darwin-arm64
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+      - name: Compile all packages with cgo disabled
+        env:
+          CGO_ENABLED: '0'
+        run: go build -mod=readonly -buildvcs=false ./...
+      - name: Build and run craftmake
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p artifacts
+          go build -mod=readonly -buildvcs=false -trimpath -o artifacts/craftmake ./cmd/craftmake
+          artifacts/craftmake --version
+      - name: Test the native release archive and bundled assets
+        run: go test ./internal/cli -run '^TestMakeReleaseBuildsPlatformArchives$' -count=1
+      - name: Archive the executable with its mode bits
+        run: tar -czf "$RUNNER_TEMP/craftmake.tar.gz" -C artifacts craftmake
+      - name: Upload the native executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: craftmake-${{ matrix.platform }}
+          path: ${{ runner.temp }}/craftmake.tar.gz
+          if-no-files-found: error
